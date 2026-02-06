@@ -120,7 +120,7 @@ security:
 # 多租户配置
 tenant:
   # 是否开启
-  enable: false
+  enable: true
   # 排除表
   excludes:
     - sys_menu
