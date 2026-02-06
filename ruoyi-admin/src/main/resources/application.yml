@@ -120,7 +120,7 @@ security:
 # 多租户配置
 tenant:
   # 是否开启
-  enable: true
+  enable: false
   # 排除表
   excludes:
     - sys_menu
@@ -252,7 +252,7 @@ websocket:
 --- # warm-flow工作流配置
 warm-flow:
   # 是否开启工作流，默认true
-  enabled: true
+  enabled: false
   # 是否开启设计器ui
   ui: true
   # 是否显示流程图顶部文字
