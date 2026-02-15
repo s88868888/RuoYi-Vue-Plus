@@ -81,16 +81,18 @@
             <artifactId>ruoyi-generator</artifactId>
         </dependency>
 
-        <!--  demo模块  -->
-        <dependency>
-            <groupId>org.dromara</groupId>
-            <artifactId>ruoyi-demo</artifactId>
-        </dependency>
+
 
         <!--  工作流模块  -->
         <dependency>
             <groupId>org.dromara</groupId>
             <artifactId>ruoyi-workflow</artifactId>
+        </dependency>
+
+        <!-- 资源模块 -->
+        <dependency>
+            <groupId>org.dromara</groupId>
+            <artifactId>ruoyi-resource</artifactId>
         </dependency>
 
         <dependency>

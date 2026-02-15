@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN" "http://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<mapper namespace="org.dromara.resource.mapper.BizPersonnelMapper">
+
+    <select id="selectByDeptId" resultType="org.dromara.resource.domain.vo.BizPersonnelVo">
+        SELECT
+            p.*,
+            d.dept_name as dept_name,
+            CASE p.gender WHEN '0' THEN '男' WHEN '1' THEN '女' ELSE '' END as gender_text,
+            CASE p.status WHEN '0' THEN '在职' WHEN '1' THEN '离职' ELSE '' END as status_text
+        FROM biz_personnel p
+        LEFT JOIN sys_dept d ON p.dept_id = d.dept_id
+        WHERE p.dept_id = #{deptId}
+        ORDER BY p.create_time DESC
+    </select>
+
+</mapper>

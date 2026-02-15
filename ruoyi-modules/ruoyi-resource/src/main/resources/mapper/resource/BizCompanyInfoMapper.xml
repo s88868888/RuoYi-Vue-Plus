@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN" "http://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<mapper namespace="org.dromara.resource.mapper.BizCompanyInfoMapper">
+
+    <select id="selectByDeptId" resultType="org.dromara.resource.domain.vo.BizCompanyInfoVo">
+        SELECT * FROM biz_company_info WHERE dept_id = #{deptId}
+    </select>
+
+</mapper>

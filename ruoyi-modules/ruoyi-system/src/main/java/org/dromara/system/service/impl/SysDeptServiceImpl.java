@@ -299,13 +299,22 @@ public class SysDeptServiceImpl implements ISysDeptService, DeptService {
     @CacheEvict(cacheNames = CacheNames.SYS_DEPT_AND_CHILD, allEntries = true)
     @Override
     public int insertDept(SysDeptBo bo) {
-        SysDept info = baseMapper.selectById(bo.getParentId());
-        // 如果父节点不为正常状态,则不允许新增子节点
-        if (!SystemConstants.NORMAL.equals(info.getStatus())) {
-            throw new ServiceException("部门停用，不允许新增");
-        }
         SysDept dept = MapstructUtils.convert(bo, SysDept.class);
-        dept.setAncestors(info.getAncestors() + StringUtils.SEPARATOR + dept.getParentId());
+        // 如果没有选择上级部门，则作为顶级部门
+        if (ObjectUtil.isNull(bo.getParentId()) || bo.getParentId() == 0) {
+            dept.setParentId(0L);
+            dept.setAncestors("0");
+        } else {
+            SysDept info = baseMapper.selectById(bo.getParentId());
+            if (ObjectUtil.isNull(info)) {
+                throw new ServiceException("上级部门不存在");
+            }
+            // 如果父节点不为正常状态,则不允许新增子节点
+            if (!SystemConstants.NORMAL.equals(info.getStatus())) {
+                throw new ServiceException("部门停用，不允许新增");
+            }
+            dept.setAncestors(info.getAncestors() + StringUtils.SEPARATOR + dept.getParentId());
+        }
         return baseMapper.insert(dept);
     }
 
