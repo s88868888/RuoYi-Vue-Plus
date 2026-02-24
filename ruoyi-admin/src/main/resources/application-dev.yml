@@ -274,3 +274,19 @@ justauth:
       client-id: 10**********6
       client-secret: 1f7d08**********5b7**********29e
       redirect-uri: ${justauth.address}/social-callback?source=gitea
+
+--- # Spring AI Alibaba 配置
+spring:
+  ai:
+    dashscope:
+      # 阿里云百炼 API Key
+      api-key: ${DASHSCOPE_API_KEY:sk-1da7f2d8b5ec4c1bac0418125f728195}
+      chat:
+        options:
+          # 使用 qwen-long 模型
+          model: qwen-long
+          # 温度参数，控制输出的随机性
+          temperature: 0.7
+          # 最大输出token数
+          max-tokens: 4000
+
