@@ -92,6 +92,12 @@ public class BizBidProjectVo implements Serializable {
     @Schema(description = "AI分析状态")
     private String aiAnalysisStatus;
 
+    @Schema(description = "评分标准")
+    private String scoringCriteria;
+
+    @Schema(description = "评分标准提取状态")
+    private String scoringCriteriaStatus;
+
     @Schema(description = "创建人")
     private Long createBy;
 

@@ -142,6 +142,16 @@ public class BizBidProject extends TenantEntity {
     private String aiAnalysisStatus;
 
     /**
+     * 评分标准
+     */
+    private String scoringCriteria;
+
+    /**
+     * 评分标准提取状态（pending待提取 extracting提取中 completed已完成 failed失败）
+     */
+    private String scoringCriteriaStatus;
+
+    /**
      * 删除标志（0代表存在 1代表删除）
      */
     @TableLogic

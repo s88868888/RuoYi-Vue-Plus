@@ -25,4 +25,18 @@ public interface IAiAnalysisService {
      */
     void analyzeBidProjectAsync(Long projectId, String prompt);
 
+    /**
+     * 提取评分标准
+     *
+     * @param projectId 项目ID
+     */
+    String extractScoringCriteria(Long projectId);
+
+    /**
+     * 异步提取评分标准
+     *
+     * @param projectId 项目ID
+     */
+    void extractScoringCriteriaAsync(Long projectId);
+
 }

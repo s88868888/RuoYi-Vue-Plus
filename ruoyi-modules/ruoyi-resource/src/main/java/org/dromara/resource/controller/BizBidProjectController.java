@@ -160,4 +160,25 @@ public class BizBidProjectController extends BaseController {
         }
     }
 
+    /**
+     * 第三步：提取评分标准
+     */
+    @Operation(summary = "提取评分标准（第三步）")
+    @Log(title = "招标项目管理", businessType = BusinessType.UPDATE)
+    @SaCheckPermission("bid:project:edit")
+    @PostMapping("/extractScoringCriteria")
+    public R<String> extractScoringCriteria(
+            @NotNull(message = "项目ID不能为空") @RequestParam Long projectId,
+            @RequestParam(required = false, defaultValue = "true") Boolean async) {
+        if (async) {
+            // 异步提取
+            aiAnalysisService.extractScoringCriteriaAsync(projectId);
+            return R.ok("评分标准提取任务已提交，请稍后查看结果");
+        } else {
+            // 同步提取
+            String result = aiAnalysisService.extractScoringCriteria(projectId);
+            return R.ok(result);
+        }
+    }
+
 }
