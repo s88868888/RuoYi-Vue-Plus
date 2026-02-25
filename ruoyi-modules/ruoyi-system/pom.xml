@@ -100,6 +100,12 @@
             <artifactId>ruoyi-common-sse</artifactId>
         </dependency>
 
+        <!-- AI模块 -->
+        <dependency>
+            <groupId>org.dromara</groupId>
+            <artifactId>ruoyi-common-ai</artifactId>
+        </dependency>
+
     </dependencies>
 
 </project>

@@ -179,6 +179,13 @@
                 <version>${revision}</version>
             </dependency>
 
+            <!-- AI模块 -->
+            <dependency>
+                <groupId>org.dromara</groupId>
+                <artifactId>ruoyi-common-ai</artifactId>
+                <version>${revision}</version>
+            </dependency>
+
         </dependencies>
     </dependencyManagement>
 
