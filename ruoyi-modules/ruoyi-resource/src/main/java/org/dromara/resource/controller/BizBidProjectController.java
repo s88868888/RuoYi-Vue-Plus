@@ -15,11 +15,16 @@ import org.dromara.common.web.core.BaseController;
 import org.dromara.resource.domain.bo.BizBidProjectBo;
 import org.dromara.resource.domain.dto.BidProjectStep1Dto;
 import org.dromara.resource.domain.dto.BidProjectStep2Dto;
+import org.dromara.resource.domain.dto.AnalyzeMatchDegreeDto;
+import org.dromara.resource.domain.dto.ExtractScoringCriteriaDto;
+import org.dromara.resource.domain.dto.QuickGenerateDto;
 import org.dromara.resource.domain.vo.BizBidProjectVo;
 import org.dromara.resource.service.IAiAnalysisService;
 import org.dromara.resource.service.IBizBidProjectService;
 import org.springframework.validation.annotation.Validated;
+import org.springframework.http.MediaType;
 import org.springframework.web.bind.annotation.*;
+import org.springframework.web.multipart.MultipartFile;
 
 import java.util.List;
 
@@ -167,18 +172,56 @@ public class BizBidProjectController extends BaseController {
     @Log(title = "招标项目管理", businessType = BusinessType.UPDATE)
     @SaCheckPermission("bid:project:edit")
     @PostMapping("/extractScoringCriteria")
-    public R<String> extractScoringCriteria(
-            @NotNull(message = "项目ID不能为空") @RequestParam Long projectId,
-            @RequestParam(required = false, defaultValue = "true") Boolean async) {
-        if (async) {
+    public R<String> extractScoringCriteria(@Validated @RequestBody ExtractScoringCriteriaDto dto) {
+        if (Boolean.TRUE.equals(dto.getAsync())) {
             // 异步提取
-            aiAnalysisService.extractScoringCriteriaAsync(projectId);
+            aiAnalysisService.extractScoringCriteriaAsync(dto.getProjectId(), dto.getAiPrompt());
             return R.ok("评分标准提取任务已提交，请稍后查看结果");
         } else {
             // 同步提取
-            String result = aiAnalysisService.extractScoringCriteria(projectId);
+            String result = aiAnalysisService.extractScoringCriteria(dto.getProjectId(), dto.getAiPrompt());
             return R.ok(result);
         }
+    }
+
+    /**
+     * 第四步：契合度分析
+     */
+    @Operation(summary = "契合度分析")
+    @Log(title = "招标项目管理", businessType = BusinessType.UPDATE)
+    @SaCheckPermission("bid:project:edit")
+    @PostMapping("/analyzeMatchDegree")
+    public R<String> analyzeMatchDegree(@Validated @RequestBody AnalyzeMatchDegreeDto dto) {
+        if (Boolean.TRUE.equals(dto.getAsync())) {
+            aiAnalysisService.analyzeMatchDegreeAsync(dto.getProjectId(), dto.getAiPrompt());
+            return R.ok("契合度分析任务已提交，请稍后查看结果");
+        } else {
+            String result = aiAnalysisService.analyzeMatchDegree(dto.getProjectId(), dto.getAiPrompt());
+            return R.ok(result);
+        }
+    }
+
+    /**
+     * 快速生成：从PDF招标文件提取信息创建项目
+     */
+    @Operation(summary = "快速生成招标项目（从PDF提取）")
+    @Log(title = "招标项目管理", businessType = BusinessType.INSERT)
+    @SaCheckPermission("bid:project:add")
+    @PostMapping(value = "/quickGenerate", consumes = MediaType.MULTIPART_FORM_DATA_VALUE)
+    public R<Long> quickGenerate(
+            @Validated QuickGenerateDto dto,
+            @RequestPart("file") MultipartFile file) {
+        // 校验文件
+        if (file == null || file.isEmpty()) {
+            return R.fail("请上传招标文件");
+        }
+        String fileName = file.getOriginalFilename();
+        if (fileName == null || !fileName.toLowerCase().endsWith(".pdf")) {
+            return R.fail("仅支持PDF格式文件");
+        }
+
+        Long projectId = bizBidProjectService.quickGenerateFromPdf(dto, file);
+        return R.ok(projectId);
     }
 
 }

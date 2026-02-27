@@ -1,13 +1,11 @@
 package org.dromara.resource.domain;
 
 import com.baomidou.mybatisplus.annotation.TableId;
-import com.baomidou.mybatisplus.annotation.TableLogic;
 import com.baomidou.mybatisplus.annotation.TableName;
 import lombok.Data;
 import lombok.EqualsAndHashCode;
 import org.dromara.common.tenant.core.TenantEntity;
 
-import java.io.Serial;
 import java.math.BigDecimal;
 import java.util.Date;
 
@@ -15,14 +13,13 @@ import java.util.Date;
  * 招标项目对象 biz_bid_project
  *
  * @author ruoyi
- * @date 2026-02-23
+ * @date 2026-02-26
  */
 @Data
 @EqualsAndHashCode(callSuper = true)
 @TableName("biz_bid_project")
 public class BizBidProject extends TenantEntity {
 
-    @Serial
     private static final long serialVersionUID = 1L;
 
     /**
@@ -32,7 +29,7 @@ public class BizBidProject extends TenantEntity {
     private Long id;
 
     /**
-     * 关联部门ID
+     * 部门ID
      */
     private Long deptId;
 
@@ -112,6 +109,11 @@ public class BizBidProject extends TenantEntity {
     private String projectDesc;
 
     /**
+     * 备注
+     */
+    private String remark;
+
+    /**
      * 附件URL，多个用逗号分隔
      */
     private String attachments;
@@ -120,11 +122,6 @@ public class BizBidProject extends TenantEntity {
      * 附件名称，多个用逗号分隔
      */
     private String attachmentName;
-
-    /**
-     * 备注
-     */
-    private String remark;
 
     /**
      * AI分析提示词
@@ -147,14 +144,8 @@ public class BizBidProject extends TenantEntity {
     private String scoringCriteria;
 
     /**
-     * 评分标准提取状态（pending待提取 extracting提取中 completed已完成 failed失败）
+     * 评分标准提取状态
      */
     private String scoringCriteriaStatus;
-
-    /**
-     * 删除标志（0代表存在 1代表删除）
-     */
-    @TableLogic
-    private String delFlag;
 
 }

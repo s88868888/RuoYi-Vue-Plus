@@ -11,6 +11,7 @@ import org.dromara.common.core.exception.ServiceException;
 import org.dromara.common.core.utils.MapstructUtils;
 import org.dromara.common.mybatis.core.page.PageQuery;
 import org.dromara.common.mybatis.core.page.TableDataInfo;
+import org.dromara.common.satoken.utils.LoginHelper;
 import org.dromara.resource.domain.BizCompanyInfo;
 import org.dromara.resource.domain.bo.BizCompanyInfoBo;
 import org.dromara.resource.domain.vo.BizCompanyInfoVo;
@@ -53,11 +54,17 @@ public class BizCompanyInfoServiceImpl extends ServiceImpl<BizCompanyInfoMapper,
 
     @Override
     public TableDataInfo<CompanyListVo> queryCompanyList(String deptName, String status, PageQuery pageQuery) {
-        // 查询部门列表（只查询顶级公司，parent_id = 0 或根据业务需求调整）
+        // 获取当前登录用户的部门ID
+        Long currentDeptId = LoginHelper.getDeptId();
+
+        // 查询当前用户所属部门及其所有子部门
+        List<Long> deptIds = sysDeptMapper.selectDeptAndChildById(currentDeptId);
+
         LambdaQueryWrapper<SysDept> deptWrapper = Wrappers.lambdaQuery();
+        deptWrapper.in(SysDept::getDeptId, deptIds);
         deptWrapper.like(ObjectUtil.isNotEmpty(deptName), SysDept::getDeptName, deptName);
         deptWrapper.eq(ObjectUtil.isNotEmpty(status), SysDept::getStatus, status);
-        deptWrapper.eq(SysDept::getParentId, 0L); // 只查询顶级部门（公司）
+        deptWrapper.orderByAsc(SysDept::getParentId);
         deptWrapper.orderByAsc(SysDept::getOrderNum);
 
         Page<SysDept> page = sysDeptMapper.selectPage(pageQuery.build(), deptWrapper);

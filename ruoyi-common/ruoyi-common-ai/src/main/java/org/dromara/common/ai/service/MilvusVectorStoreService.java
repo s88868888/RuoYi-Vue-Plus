@@ -376,14 +376,7 @@ public class MilvusVectorStoreService {
         try {
             // 使用 Spring AI Alibaba 的 DashScope Embedding 模型
             Document document = new Document(text);
-            List<Double> embedding = embeddingModel.embed(document);
-
-            // 转换为 float[]
-            float[] result = new float[embedding.size()];
-            for (int i = 0; i < embedding.size(); i++) {
-                result[i] = embedding.get(i).floatValue();
-            }
-            return result;
+            return embeddingModel.embed(document);
 
         } catch (Exception e) {
             log.error("生成向量失败", e);

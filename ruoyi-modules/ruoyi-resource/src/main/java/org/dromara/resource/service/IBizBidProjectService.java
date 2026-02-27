@@ -5,7 +5,9 @@ import org.dromara.common.mybatis.core.page.PageQuery;
 import org.dromara.common.mybatis.core.page.TableDataInfo;
 import org.dromara.resource.domain.BizBidProject;
 import org.dromara.resource.domain.bo.BizBidProjectBo;
+import org.dromara.resource.domain.dto.QuickGenerateDto;
 import org.dromara.resource.domain.vo.BizBidProjectVo;
+import org.springframework.web.multipart.MultipartFile;
 
 import java.util.List;
 
@@ -66,5 +68,14 @@ public interface IBizBidProjectService extends IService<BizBidProject> {
      * @return 结果
      */
     Boolean deleteWithValidByIds(List<Long> ids, Boolean isValid);
+
+    /**
+     * 从PDF文件快速生成招标项目
+     *
+     * @param dto  快速生成DTO
+     * @param file PDF文件
+     * @return 招标项目ID
+     */
+    Long quickGenerateFromPdf(QuickGenerateDto dto, MultipartFile file);
 
 }

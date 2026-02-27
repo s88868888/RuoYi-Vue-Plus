@@ -9,6 +9,8 @@ import org.springframework.boot.context.properties.EnableConfigurationProperties
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 
+import java.util.concurrent.TimeUnit;
+
 /**
  * Milvus 配置类
  *
@@ -31,8 +33,8 @@ public class MilvusConfig {
         ConnectParam.Builder builder = ConnectParam.newBuilder()
             .withHost(milvusProperties.getHost())
             .withPort(milvusProperties.getPort())
-            .withConnectTimeout(milvusProperties.getConnectTimeout())
-            .withKeepAliveTime(milvusProperties.getKeepAliveTime());
+            .withConnectTimeout(milvusProperties.getConnectTimeout(), TimeUnit.MILLISECONDS)
+            .withKeepAliveTime(milvusProperties.getKeepAliveTime(), TimeUnit.MILLISECONDS);
 
         // 如果配置了用户名和密码
         if (milvusProperties.getUsername() != null && !milvusProperties.getUsername().isEmpty()) {

@@ -3,13 +3,15 @@ package org.dromara.resource.service.impl;
 import cn.hutool.core.util.StrUtil;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.dromara.common.ai.service.AiChatService;
 import org.dromara.resource.domain.BizBidProject;
 import org.dromara.resource.mapper.BizBidProjectMapper;
 import org.dromara.resource.service.IAiAnalysisService;
-import org.springframework.ai.chat.model.ChatModel;
-import org.springframework.ai.chat.prompt.Prompt;
 import org.springframework.scheduling.annotation.Async;
 import org.springframework.stereotype.Service;
+
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 /**
  * AI分析服务实现
@@ -22,7 +24,7 @@ import org.springframework.stereotype.Service;
 @RequiredArgsConstructor
 public class AiAnalysisServiceImpl implements IAiAnalysisService {
 
-    private final ChatModel chatModel;
+    private final AiChatService aiChatService;
     private final BizBidProjectMapper bidProjectMapper;
 
     /**
@@ -74,6 +76,26 @@ public class AiAnalysisServiceImpl implements IAiAnalysisService {
             请确保输出格式清晰、结构完整、易于理解。
             """;
 
+    /**
+     * 契合度分析提示词
+     */
+    private static final String MATCH_ANALYSIS_PROMPT = """
+            你是专业的招投标分析专家。请根据以下项目信息评估综合契合度（0-100分）。
+
+            项目名称：{projectName}
+            招标单位：{bidOrg}
+            项目类型：{projectType}
+            预算金额：{budgetAmount}万元
+            项目地区：{projectRegion}
+            招标方式：{bidMethod}
+            项目描述：{projectDesc}
+
+            输出要求：
+            1. 给出0-100的契合度评分
+            2. 给出核心分析理由（优势、劣势、建议）
+            3. 第一行必须包含“score: 分数”
+            """;
+
     @Override
     public String analyzeBidProject(Long projectId, String prompt) {
         BizBidProject project = bidProjectMapper.selectById(projectId);
@@ -84,7 +106,7 @@ public class AiAnalysisServiceImpl implements IAiAnalysisService {
         String finalPrompt = buildPrompt(project, prompt);
 
         try {
-            String result = chatModel.call(finalPrompt);
+            String result = aiChatService.chat(finalPrompt);
 
             // 更新分析结果
             project.setAiAnalysisResult(result);
@@ -122,16 +144,16 @@ public class AiAnalysisServiceImpl implements IAiAnalysisService {
     }
 
     @Override
-    public String extractScoringCriteria(Long projectId) {
+    public String extractScoringCriteria(Long projectId, String prompt) {
         BizBidProject project = bidProjectMapper.selectById(projectId);
         if (project == null) {
             throw new RuntimeException("项目不存在");
         }
 
-        String finalPrompt = buildScoringCriteriaPrompt(project);
+        String finalPrompt = buildScoringCriteriaPrompt(project, prompt);
 
         try {
-            String result = chatModel.call(finalPrompt);
+            String result = aiChatService.chat(finalPrompt);
 
             // 更新评分标准结果
             project.setScoringCriteria(result);
@@ -149,7 +171,7 @@ public class AiAnalysisServiceImpl implements IAiAnalysisService {
 
     @Async
     @Override
-    public void extractScoringCriteriaAsync(Long projectId) {
+    public void extractScoringCriteriaAsync(Long projectId, String prompt) {
         BizBidProject project = bidProjectMapper.selectById(projectId);
         if (project == null) {
             log.error("项目不存在：{}", projectId);
@@ -161,10 +183,43 @@ public class AiAnalysisServiceImpl implements IAiAnalysisService {
         bidProjectMapper.updateById(project);
 
         try {
-            extractScoringCriteria(projectId);
+            extractScoringCriteria(projectId, prompt);
             log.info("项目{}评分标准提取完成", projectId);
         } catch (Exception e) {
             log.error("异步提取评分标准失败", e);
+        }
+    }
+
+    @Override
+    public String analyzeMatchDegree(Long projectId, String prompt) {
+        BizBidProject project = bidProjectMapper.selectById(projectId);
+        if (project == null) {
+            throw new RuntimeException("项目不存在");
+        }
+
+        String finalPrompt = buildMatchAnalysisPrompt(project, prompt);
+        try {
+            String result = aiChatService.chat(finalPrompt);
+            Integer score = parseMatchScore(result);
+            if (score != null) {
+                project.setMatchDegree(score);
+                bidProjectMapper.updateById(project);
+            }
+            return result;
+        } catch (Exception e) {
+            log.error("契合度分析失败", e);
+            throw new RuntimeException("契合度分析失败：" + e.getMessage());
+        }
+    }
+
+    @Async
+    @Override
+    public void analyzeMatchDegreeAsync(Long projectId, String prompt) {
+        try {
+            analyzeMatchDegree(projectId, prompt);
+            log.info("项目{}契合度分析完成", projectId);
+        } catch (Exception e) {
+            log.error("异步契合度分析失败", e);
         }
     }
 
@@ -187,8 +242,9 @@ public class AiAnalysisServiceImpl implements IAiAnalysisService {
     /**
      * 构建评分标准提示词
      */
-    private String buildScoringCriteriaPrompt(BizBidProject project) {
-        return SCORING_CRITERIA_PROMPT
+    private String buildScoringCriteriaPrompt(BizBidProject project, String customPrompt) {
+        String template = StrUtil.isNotBlank(customPrompt) ? customPrompt : SCORING_CRITERIA_PROMPT;
+        return template
             .replace("{projectName}", StrUtil.nullToEmpty(project.getProjectName()))
             .replace("{bidOrg}", StrUtil.nullToEmpty(project.getBidOrg()))
             .replace("{projectType}", StrUtil.nullToEmpty(project.getProjectType()))
@@ -196,6 +252,58 @@ public class AiAnalysisServiceImpl implements IAiAnalysisService {
             .replace("{projectRegion}", StrUtil.nullToEmpty(project.getProjectRegion()))
             .replace("{bidMethod}", StrUtil.nullToEmpty(project.getBidMethod()))
             .replace("{projectDesc}", StrUtil.nullToEmpty(project.getProjectDesc()));
+    }
+
+    /**
+     * 构建契合度分析提示词
+     */
+    private String buildMatchAnalysisPrompt(BizBidProject project, String customPrompt) {
+        String template = StrUtil.isNotBlank(customPrompt) ? customPrompt : MATCH_ANALYSIS_PROMPT;
+        return template
+            .replace("{projectName}", StrUtil.nullToEmpty(project.getProjectName()))
+            .replace("{bidOrg}", StrUtil.nullToEmpty(project.getBidOrg()))
+            .replace("{projectType}", StrUtil.nullToEmpty(project.getProjectType()))
+            .replace("{budgetAmount}", project.getBudgetAmount() != null ? project.getBudgetAmount().toString() : "未知")
+            .replace("{projectRegion}", StrUtil.nullToEmpty(project.getProjectRegion()))
+            .replace("{bidMethod}", StrUtil.nullToEmpty(project.getBidMethod()))
+            .replace("{projectDesc}", StrUtil.nullToEmpty(project.getProjectDesc()));
+    }
+
+    /**
+     * 从AI返回文本中提取0-100分数
+     */
+    private Integer parseMatchScore(String text) {
+        if (StrUtil.isBlank(text)) {
+            return null;
+        }
+
+        Pattern scorePattern = Pattern.compile("(?i)score\\s*[:：]\\s*(\\d{1,3})");
+        Matcher scoreMatcher = scorePattern.matcher(text);
+        if (scoreMatcher.find()) {
+            return normalizeScore(scoreMatcher.group(1));
+        }
+
+        Pattern firstNumberPattern = Pattern.compile("\\b(\\d{1,3})\\b");
+        Matcher firstNumberMatcher = firstNumberPattern.matcher(text);
+        if (firstNumberMatcher.find()) {
+            return normalizeScore(firstNumberMatcher.group(1));
+        }
+        return null;
+    }
+
+    private Integer normalizeScore(String scoreText) {
+        try {
+            int score = Integer.parseInt(scoreText);
+            if (score < 0) {
+                return 0;
+            }
+            if (score > 100) {
+                return 100;
+            }
+            return score;
+        } catch (NumberFormatException e) {
+            return null;
+        }
     }
 
 }

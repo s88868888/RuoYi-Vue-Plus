@@ -51,6 +51,9 @@ user:
 spring:
   application:
     name: RuoYi-Vue-Plus
+  main:
+    # 允许Bean定义覆盖（解决Spring AI Alibaba自动配置冲突）
+    allow-bean-definition-overriding: true
   threads:
     # 开启虚拟线程 仅jdk21可用
     virtual:
