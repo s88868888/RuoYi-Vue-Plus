@@ -7,6 +7,7 @@ import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
 import com.baomidou.mybatisplus.core.toolkit.Wrappers;
 import com.baomidou.mybatisplus.extension.plugins.pagination.Page;
 import io.github.linpeilie.Converter;
+import jakarta.servlet.http.HttpServletResponse;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.dromara.common.core.utils.MapstructUtils;
@@ -15,20 +16,22 @@ import org.dromara.common.mybatis.core.page.PageQuery;
 import org.dromara.common.mybatis.core.page.TableDataInfo;
 import org.dromara.resource.domain.BizBidProject;
 import org.dromara.resource.domain.BizBidSubmission;
+import org.dromara.resource.domain.BizSubmissionChapter;
 import org.dromara.resource.domain.bo.BizBidSubmissionBo;
 import org.dromara.resource.domain.bo.GenerationConfigBo;
 import org.dromara.resource.domain.vo.BizBidSubmissionVo;
 import org.dromara.resource.domain.vo.BidSubmissionProgressVo;
+import org.dromara.resource.domain.vo.BizSubmissionChapterVo;
 import org.dromara.resource.mapper.BizBidProjectMapper;
 import org.dromara.resource.mapper.BizBidSubmissionMapper;
+import org.dromara.resource.mapper.BizSubmissionChapterMapper;
 import org.dromara.resource.service.IBidDocumentGenerationService;
 import org.dromara.resource.service.IBizBidSubmissionService;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
-import java.util.Collection;
-import java.util.Date;
-import java.util.List;
+import java.util.*;
+import java.util.stream.Collectors;
 
 /**
  * 投标项目Service业务层处理
@@ -43,6 +46,7 @@ public class BizBidSubmissionServiceImpl implements IBizBidSubmissionService {
 
     private final BizBidSubmissionMapper baseMapper;
     private final BizBidProjectMapper bidProjectMapper;
+    private final BizSubmissionChapterMapper chapterMapper;
     private final IBidDocumentGenerationService documentGenerationService;
     private final Converter converter;
 
@@ -236,6 +240,75 @@ public class BizBidSubmissionServiceImpl implements IBizBidSubmissionService {
 
         // 开始生成
         return startGeneration(submissionId);
+    }
+
+    @Override
+    @Transactional(rollbackFor = Exception.class)
+    public Boolean saveStep1Config(BizBidSubmissionBo bo) {
+        BizBidSubmission submission = baseMapper.selectById(bo.getId());
+        if (submission == null) {
+            throw new RuntimeException("投标项目不存在");
+        }
+        submission.setSelectedCompanies(bo.getSelectedCompanies());
+        submission.setGenerationConfig(bo.getGenerationConfig());
+        if (bo.getGenerationConfig() != null) {
+            int totalDocs = calculateTotalDocuments(bo.getGenerationConfig());
+            submission.setTotalDocuments(totalDocs);
+        }
+        return baseMapper.updateById(submission) > 0;
+    }
+
+    @Override
+    @Transactional(rollbackFor = Exception.class)
+    public Boolean generateChapterStructure(Long submissionId) {
+        BizBidSubmission submission = baseMapper.selectById(submissionId);
+        if (submission == null) {
+            throw new RuntimeException("投标项目不存在");
+        }
+        // TODO: 调用AI生成章节结构，暂时标记为已生成
+        submission.setChapterStructureGenerated("Y");
+        baseMapper.updateById(submission);
+        return true;
+    }
+
+    @Override
+    public List<BizSubmissionChapterVo> getChapterTree(Long submissionId) {
+        List<BizSubmissionChapterVo> allChapters = chapterMapper.selectVoList(
+            Wrappers.<BizSubmissionChapter>lambdaQuery()
+                .eq(BizSubmissionChapter::getBidSubmissionId, submissionId)
+                .orderByAsc(BizSubmissionChapter::getSortOrder)
+        );
+        return buildTree(allChapters, 0L);
+    }
+
+    private List<BizSubmissionChapterVo> buildTree(List<BizSubmissionChapterVo> all, Long parentId) {
+        List<BizSubmissionChapterVo> tree = new ArrayList<>();
+        for (BizSubmissionChapterVo chapter : all) {
+            if (Objects.equals(chapter.getParentId(), parentId)) {
+                chapter.setChildren(buildTree(all, chapter.getId()));
+                tree.add(chapter);
+            }
+        }
+        return tree;
+    }
+
+    @Override
+    @Transactional(rollbackFor = Exception.class)
+    public Boolean startContentGeneration(Long submissionId) {
+        return startGeneration(submissionId);
+    }
+
+    @Override
+    public void exportDocument(Long submissionId, HttpServletResponse response) {
+        BizBidSubmission submission = baseMapper.selectById(submissionId);
+        if (submission == null) {
+            throw new RuntimeException("投标项目不存在");
+        }
+        if (!"completed".equals(submission.getSubmissionStatus())) {
+            throw new RuntimeException("标书尚未生成完成，无法导出");
+        }
+        // TODO: 实现标书文件导出逻辑
+        log.info("导出标书文件: submissionId={}", submissionId);
     }
 
 }

@@ -49,7 +49,7 @@ public class BizBidProject extends TenantEntity {
     private String projectType;
 
     /**
-     * 预算金额（万元）
+     * 预算金额（元）
      */
     private BigDecimal budgetAmount;
 
@@ -94,7 +94,7 @@ public class BizBidProject extends TenantEntity {
     private String contactPhone;
 
     /**
-     * 项目来源（manual手动录入 crawler爬虫获取）
+     * 项目来源（manual手动录入 crawler爬虫获取 quick_generate快速生成）
      */
     private String projectSource;
 
@@ -147,5 +147,15 @@ public class BizBidProject extends TenantEntity {
      * 评分标准提取状态
      */
     private String scoringCriteriaStatus;
+
+    /**
+     * 契合度分析结果
+     */
+    private String matchAnalysisResult;
+
+    /**
+     * 契合度分析状态（pending待分析 processing分析中 completed已完成 failed失败）
+     */
+    private String matchAnalysisStatus;
 
 }

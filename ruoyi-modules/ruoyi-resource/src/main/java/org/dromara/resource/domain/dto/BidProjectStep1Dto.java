@@ -38,7 +38,7 @@ public class BidProjectStep1Dto implements Serializable {
     @Schema(description = "项目类型")
     private String projectType;
 
-    @Schema(description = "预算金额（万元）")
+    @Schema(description = "预算金额（元）")
     private BigDecimal budgetAmount;
 
     @Schema(description = "发布日期")

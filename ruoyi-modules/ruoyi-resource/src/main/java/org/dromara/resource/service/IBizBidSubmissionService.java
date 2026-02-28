@@ -1,10 +1,12 @@
 package org.dromara.resource.service;
 
+import jakarta.servlet.http.HttpServletResponse;
 import org.dromara.common.mybatis.core.page.PageQuery;
 import org.dromara.common.mybatis.core.page.TableDataInfo;
 import org.dromara.resource.domain.bo.BizBidSubmissionBo;
 import org.dromara.resource.domain.vo.BizBidSubmissionVo;
 import org.dromara.resource.domain.vo.BidSubmissionProgressVo;
+import org.dromara.resource.domain.vo.BizSubmissionChapterVo;
 
 import java.util.Collection;
 import java.util.List;
@@ -87,5 +89,45 @@ public interface IBizBidSubmissionService {
      * @return 是否成功
      */
     Boolean regenerate(Long submissionId);
+
+    /**
+     * 第一步：保存公司关联和生成配置
+     *
+     * @param bo 配置信息
+     * @return 是否成功
+     */
+    Boolean saveStep1Config(BizBidSubmissionBo bo);
+
+    /**
+     * 第二步：生成章节结构
+     *
+     * @param submissionId 投标项目ID
+     * @return 是否成功
+     */
+    Boolean generateChapterStructure(Long submissionId);
+
+    /**
+     * 第二步：获取章节树结构
+     *
+     * @param submissionId 投标项目ID
+     * @return 章节树
+     */
+    List<BizSubmissionChapterVo> getChapterTree(Long submissionId);
+
+    /**
+     * 第二步：开始生成标书内容
+     *
+     * @param submissionId 投标项目ID
+     * @return 是否成功
+     */
+    Boolean startContentGeneration(Long submissionId);
+
+    /**
+     * 第三步：导出标书文件
+     *
+     * @param submissionId 投标项目ID
+     * @param response HTTP响应
+     */
+    void exportDocument(Long submissionId, HttpServletResponse response);
 
 }

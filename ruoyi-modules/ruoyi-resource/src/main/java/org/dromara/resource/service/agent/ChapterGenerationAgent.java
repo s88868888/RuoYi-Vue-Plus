@@ -66,7 +66,7 @@ public class ChapterGenerationAgent {
             项目名称：%s
             招标单位：%s
             项目类型：%s
-            预算金额：%s万元
+            预算金额：%s元
             项目描述：%s
 
             【公司信息】

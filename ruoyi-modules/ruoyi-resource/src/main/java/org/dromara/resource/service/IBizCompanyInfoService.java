@@ -70,4 +70,18 @@ public interface IBizCompanyInfoService extends IService<BizCompanyInfo> {
      */
     Boolean deleteWithValidByIds(Collection<Long> ids, Boolean isValid);
 
+    /**
+     * 同步所有企业信息到向量库
+     *
+     * @return 同步的企业数量
+     */
+    int syncAllToVector();
+
+    /**
+     * 同步指定企业信息到向量库
+     *
+     * @param deptId 部门ID
+     */
+    void syncToVector(Long deptId);
+
 }

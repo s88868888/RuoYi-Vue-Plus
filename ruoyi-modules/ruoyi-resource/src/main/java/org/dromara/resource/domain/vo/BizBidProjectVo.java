@@ -38,7 +38,7 @@ public class BizBidProjectVo implements Serializable {
     @Schema(description = "项目类型")
     private String projectType;
 
-    @Schema(description = "预算金额（万元）")
+    @Schema(description = "预算金额（元）")
     private BigDecimal budgetAmount;
 
     @Schema(description = "发布日期")
@@ -97,6 +97,12 @@ public class BizBidProjectVo implements Serializable {
 
     @Schema(description = "评分标准提取状态")
     private String scoringCriteriaStatus;
+
+    @Schema(description = "契合度分析结果")
+    private String matchAnalysisResult;
+
+    @Schema(description = "契合度分析状态")
+    private String matchAnalysisStatus;
 
     @Schema(description = "创建人")
     private Long createBy;

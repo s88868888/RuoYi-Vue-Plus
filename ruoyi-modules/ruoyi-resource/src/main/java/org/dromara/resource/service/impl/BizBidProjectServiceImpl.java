@@ -17,6 +17,8 @@ import org.dromara.resource.domain.vo.BizBidProjectVo;
 import org.dromara.resource.mapper.BizBidProjectMapper;
 import org.dromara.resource.service.IAiAnalysisService;
 import org.dromara.resource.service.IBizBidProjectService;
+import org.dromara.system.domain.vo.SysOssVo;
+import org.dromara.system.service.ISysOssService;
 import org.apache.pdfbox.Loader;
 import org.apache.pdfbox.pdmodel.PDDocument;
 import org.apache.pdfbox.text.PDFTextStripper;
@@ -27,7 +29,6 @@ import org.springframework.ai.chat.prompt.Prompt;
 import org.springframework.stereotype.Service;
 import org.springframework.web.multipart.MultipartFile;
 
-import java.io.ByteArrayInputStream;
 import java.io.IOException;
 import java.math.BigDecimal;
 import java.text.SimpleDateFormat;
@@ -49,6 +50,7 @@ public class BizBidProjectServiceImpl extends ServiceImpl<BizBidProjectMapper, B
     private final BizBidProjectMapper bizBidProjectMapper;
     private final ChatModel chatModel;
     private final IAiAnalysisService aiAnalysisService;
+    private final ISysOssService sysOssService;
 
     @Override
     public TableDataInfo<BizBidProjectVo> queryPageList(BizBidProjectBo bo, PageQuery pageQuery) {
@@ -130,7 +132,10 @@ public class BizBidProjectServiceImpl extends ServiceImpl<BizBidProjectMapper, B
             // 2. 使用AI提取招标信息
             Map<String, Object> bidInfo = extractBidInfoFromAi(pdfContent);
 
-            // 3. 创建招标项目
+            // 3. 上传文件到OSS
+            SysOssVo ossVo = sysOssService.upload(file);
+
+            // 4. 创建招标项目
             BizBidProject project = new BizBidProject();
             project.setProjectName((String) bidInfo.getOrDefault("projectName", "未命名项目"));
             project.setBidOrg((String) bidInfo.getOrDefault("bidOrg", ""));
@@ -140,31 +145,34 @@ public class BizBidProjectServiceImpl extends ServiceImpl<BizBidProjectMapper, B
             project.setDeadline((Date) bidInfo.get("deadline"));
             project.setProjectRegion((String) bidInfo.getOrDefault("projectRegion", ""));
             project.setBidMethod((String) bidInfo.getOrDefault("bidMethod", ""));
+            project.setContactPerson((String) bidInfo.getOrDefault("contactPerson", ""));
+            project.setContactPhone((String) bidInfo.getOrDefault("contactPhone", ""));
             project.setProjectDesc((String) bidInfo.getOrDefault("projectDesc", ""));
             project.setStatus("following");
-            project.setProjectSource("ai_generate");
-            project.setAttachmentName(file.getOriginalFilename());
+            project.setProjectSource("quick_generate");
+            project.setAttachments(String.valueOf(ossVo.getOssId()));
+            project.setAttachmentName(ossVo.getOriginalName());
             project.setAiPrompt(dto.getAiPrompt());
             project.setAiAnalysisStatus("pending");
             project.setScoringCriteriaStatus("pending");
 
-            // 4. 保存项目
+            // 5. 保存项目
             bizBidProjectMapper.insert(project);
             Long projectId = project.getId();
 
             log.info("招标项目创建成功，ID: {}", projectId);
 
-            // 5. 如果需要AI分析
+            // 6. 如果需要AI分析
             if (Boolean.TRUE.equals(dto.getEnableAiAnalysis())) {
                 aiAnalysisService.analyzeBidProjectAsync(projectId, dto.getAiPrompt());
             }
 
-            // 6. 如果需要提取评分标准
+            // 7. 如果需要提取评分标准
             if (Boolean.TRUE.equals(dto.getEnableExtractScoringCriteria())) {
                 aiAnalysisService.extractScoringCriteriaAsync(projectId, dto.getScoringPrompt());
             }
 
-            // 7. 如果需要契合度分析
+            // 8. 如果需要契合度分析
             if (Boolean.TRUE.equals(dto.getAnalyzeMatchDegree())) {
                 aiAnalysisService.analyzeMatchDegreeAsync(projectId, dto.getMatchAnalysisPrompt());
             }
@@ -229,19 +237,22 @@ public class BizBidProjectServiceImpl extends ServiceImpl<BizBidProjectMapper, B
             请提取以下字段并返回JSON：
             {
                 "projectName": "项目名称",
-                "bidOrg": "招标单位",
+                "bidOrg": "招标单位/采购单位",
                 "projectType": "项目类型（engineering工程 goods货物 service服务）",
-                "budgetAmount": 预算金额（数字，单位万元）,
-                "publishDate": 发布日期（YYYY-MM-DD格式）,
-                "deadline": 截止日期（YYYY-MM-DD格式）,
-                "projectRegion": 项目地区/省份城市,
-                "bidMethod": 招标方式（public公开招标 invite邀请招标 competitive竞争性谈判 inquiry询价采购 single单一来源）,
-                "projectDesc": 项目描述/概况
+                "budgetAmount": 预算金额（纯数字，单位元，如100万则返回1000000，如无则返回null）,
+                "publishDate": "发布日期（YYYY-MM-DD格式，如无则返回null）",
+                "deadline": "截止日期/投标截止时间（YYYY-MM-DD格式，如无则返回null）",
+                "projectRegion": "项目所在地区/省份城市",
+                "bidMethod": "招标方式（public公开招标 invite邀请招标 competitive竞争性谈判 inquiry询价采购 single单一来源）",
+                "contactPerson": "联系人姓名（如无则返回空字符串）",
+                "contactPhone": "联系电话（如无则返回空字符串）",
+                "projectDesc": "项目描述/概况（100字以内）"
             }
 
-            如果某个字段无法提取，请返回空字符串或null。
-            budgetAmount必须是数字，如果不是数字请返回null。
-            日期必须是YYYY-MM-DD格式。
+            注意事项：
+            - budgetAmount只能是纯数字，不包含单位，无法确定时返回null
+            - 日期格式必须为YYYY-MM-DD，无法确定时返回null
+            - 只返回JSON，不要有其他说明文字
             """.formatted(content);
     }
 
@@ -265,6 +276,8 @@ public class BizBidProjectServiceImpl extends ServiceImpl<BizBidProjectMapper, B
                 result.put("projectType", extractJsonValue(jsonStr, "projectType"));
                 result.put("projectRegion", extractJsonValue(jsonStr, "projectRegion"));
                 result.put("bidMethod", extractJsonValue(jsonStr, "bidMethod"));
+                result.put("contactPerson", extractJsonValue(jsonStr, "contactPerson"));
+                result.put("contactPhone", extractJsonValue(jsonStr, "contactPhone"));
                 result.put("projectDesc", extractJsonValue(jsonStr, "projectDesc"));
 
                 // 解析预算金额
@@ -296,13 +309,21 @@ public class BizBidProjectServiceImpl extends ServiceImpl<BizBidProjectMapper, B
     }
 
     /**
-     * 从JSON字符串中提取指定字段的值
+     * 从JSON字符串中提取指定字段的值（支持字符串、数字、null）
      */
     private String extractJsonValue(String json, String field) {
-        Pattern pattern = Pattern.compile("\"" + field + "\"\\s*:\\s*\"([^\"]*)\"");
-        Matcher matcher = pattern.matcher(json);
-        if (matcher.find()) {
-            return matcher.group(1);
+        // 先匹配字符串值 "field": "value"
+        Pattern strPattern = Pattern.compile("\"" + field + "\"\\s*:\\s*\"([^\"]*)\"");
+        Matcher strMatcher = strPattern.matcher(json);
+        if (strMatcher.find()) {
+            return strMatcher.group(1);
+        }
+        // 再匹配数字或null值 "field": 123 / "field": null
+        Pattern numPattern = Pattern.compile("\"" + field + "\"\\s*:\\s*([\\d.]+|null)");
+        Matcher numMatcher = numPattern.matcher(json);
+        if (numMatcher.find()) {
+            String val = numMatcher.group(1);
+            return "null".equals(val) ? null : val;
         }
         return null;
     }

@@ -1,12 +1,15 @@
 package org.dromara.common.ai.service;
 
-import lombok.RequiredArgsConstructor;
+import com.alibaba.cloud.ai.advisor.DashScopeDocumentAnalysisAdvisor;
+import com.alibaba.cloud.ai.dashscope.chat.DashScopeChatOptions;
 import lombok.extern.slf4j.Slf4j;
-import org.springframework.ai.chat.messages.SystemMessage;
-import org.springframework.ai.chat.messages.UserMessage;
-import org.springframework.ai.chat.model.ChatModel;
+import org.springframework.ai.chat.client.ChatClient;
 import org.springframework.ai.chat.prompt.Prompt;
 import org.springframework.ai.embedding.EmbeddingModel;
+import org.springframework.ai.model.SimpleApiKey;
+import org.springframework.beans.factory.annotation.Value;
+import org.springframework.core.io.Resource;
+import org.springframework.core.io.UrlResource;
 import org.springframework.stereotype.Service;
 
 import java.util.ArrayList;
@@ -23,66 +26,95 @@ import java.util.Map;
  */
 @Slf4j
 @Service
-@RequiredArgsConstructor
 public class AiChatService {
 
-    private final ChatModel chatModel;
     private final EmbeddingModel embeddingModel;
+    private final ChatClient chatClient;
+
+    public AiChatService(EmbeddingModel embeddingModel,
+                         ChatClient.Builder chatClientBuilder,
+                         @Value("${spring.ai.dashscope.api-key}") String apiKey) {
+        this.embeddingModel = embeddingModel;
+        this.chatClient = chatClientBuilder
+            .defaultAdvisors(new DashScopeDocumentAnalysisAdvisor(new SimpleApiKey(apiKey)))
+            .build();
+    }
+
+    private static final DashScopeChatOptions CHAT_OPTIONS = DashScopeChatOptions.builder()
+        .model("qwen3.5-plus")
+        .temperature(0.3)
+        .topP(0.9)
+        .build();
+
+    private static final DashScopeChatOptions DOC_OPTIONS = DashScopeChatOptions.builder()
+        .model("qwen-long-latest")
+        .temperature(0.3)
+        .maxToken(4000)
+        .topP(0.8)
+        .build();
 
     /**
-     * 简单的文本对话
+     * 简单的文本对话（qwen-plus）
      *
      * @param message 用户消息
      * @return AI 回复
      */
     public String chat(String message) {
-        return chatModel.call(message);
+        return chatClient.prompt()
+            .user(message)
+            .options(CHAT_OPTIONS)
+            .call()
+            .content();
     }
 
     /**
-     * 带系统提示词的对话
+     * 带系统提示词的对话（qwen-plus）
      *
      * @param systemPrompt 系统提示词
      * @param userMessage  用户消息
      * @return AI 回复
      */
     public String chat(String systemPrompt, String userMessage) {
-        Prompt prompt = new Prompt(List.of(
-            new SystemMessage(systemPrompt),
-            new UserMessage(userMessage)
-        ));
-        return chatModel.call(prompt).getResult().getOutput().getText();
+        return chatClient.prompt()
+            .system(systemPrompt)
+            .user(userMessage)
+            .options(CHAT_OPTIONS)
+            .call()
+            .content();
     }
 
     /**
-     * 带变量替换的系统提示词对话
+     * 带变量替换的系统提示词对话（qwen-plus）
      *
      * @param systemPromptTemplate 带变量的系统提示词模板，如：你好{name}，今天是{day}
-     * @param variables           变量映射，如：{"name": "张三", "day": "星期一"}
-     * @param userMessage         用户消息
+     * @param variables            变量映射，如：{"name": "张三", "day": "星期一"}
+     * @param userMessage          用户消息
      * @return AI 回复
      */
     public String chatWithTemplate(String systemPromptTemplate, Map<String, Object> variables, String userMessage) {
-        // 手动替换模板变量
         String resolvedSystemPrompt = systemPromptTemplate;
         for (Map.Entry<String, Object> entry : variables.entrySet()) {
             resolvedSystemPrompt = resolvedSystemPrompt.replace("{" + entry.getKey() + "}", String.valueOf(entry.getValue()));
         }
-        Prompt prompt = new Prompt(List.of(
-            new SystemMessage(resolvedSystemPrompt),
-            new UserMessage(userMessage)
-        ));
-        return chatModel.call(prompt).getResult().getOutput().getText();
+        return chatClient.prompt()
+            .system(resolvedSystemPrompt)
+            .user(userMessage)
+            .options(CHAT_OPTIONS)
+            .call()
+            .content();
     }
 
     /**
-     * 使用 Prompt 对象进行对话
+     * 使用 Prompt 对象进行对话（qwen-plus）
      *
      * @param prompt Spring AI Prompt 对象
      * @return AI 回复
      */
     public String chat(Prompt prompt) {
-        return chatModel.call(prompt).getResult().getOutput().getText();
+        return chatClient.prompt(prompt)
+            .options(CHAT_OPTIONS)
+            .call()
+            .content();
     }
 
     /**
@@ -107,6 +139,33 @@ public class AiChatService {
             results.add(embeddingModel.embed(text));
         }
         return results;
+    }
+
+    /**
+     * 通过 Resource 对象传递文件进行分析
+     *
+     * @param resource    文件资源
+     * @param userMessage 用户消息
+     * @return AI 回复
+     */
+    public String chatWithDocument(Resource resource, String userMessage) {
+        return chatClient.prompt()
+            .advisors(a -> a.param(DashScopeDocumentAnalysisAdvisor.RESOURCE, resource))
+            .user(userMessage)
+            .options(DOC_OPTIONS)
+            .call()
+            .content();
+    }
+
+    /**
+     * 通过 URL 传递文件进行分析
+     *
+     * @param url         文件 URL
+     * @param userMessage 用户消息
+     * @return AI 回复
+     */
+    public String chatWithDocumentUrl(String url, String userMessage) {
+        return chatWithDocument(UrlResource.from(url), userMessage);
     }
 
 }

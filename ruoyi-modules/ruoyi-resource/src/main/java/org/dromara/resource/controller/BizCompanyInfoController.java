@@ -99,4 +99,28 @@ public class BizCompanyInfoController extends BaseController {
         return toAjax(bizCompanyInfoService.deleteWithValidByIds(List.of(ids), true));
     }
 
+    /**
+     * 同步所有企业信息到向量库
+     */
+    @Operation(summary = "同步所有企业信息到向量库")
+    @Log(title = "企业信息管理", businessType = BusinessType.UPDATE)
+    @SaCheckPermission("resource:companyInfo:edit")
+    @PostMapping("/syncVector")
+    public R<String> syncAllToVector() {
+        int count = bizCompanyInfoService.syncAllToVector();
+        return R.ok("已触发同步 " + count + " 个企业信息到向量库");
+    }
+
+    /**
+     * 同步指定企业信息到向量库
+     */
+    @Operation(summary = "同步指定企业信息到向量库")
+    @Log(title = "企业信息管理", businessType = BusinessType.UPDATE)
+    @SaCheckPermission("resource:companyInfo:edit")
+    @PostMapping("/syncVector/{deptId}")
+    public R<Void> syncToVector(@NotNull(message = "部门ID不能为空") @PathVariable Long deptId) {
+        bizCompanyInfoService.syncToVector(deptId);
+        return R.ok();
+    }
+
 }

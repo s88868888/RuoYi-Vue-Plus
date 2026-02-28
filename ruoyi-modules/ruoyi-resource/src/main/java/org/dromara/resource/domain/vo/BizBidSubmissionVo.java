@@ -58,7 +58,7 @@ public class BizBidSubmissionVo implements Serializable {
     private String projectType;
 
     /**
-     * 预算金额（万元）
+     * 预算金额（元）
      */
     @ExcelProperty(value = "预算金额")
     private BigDecimal budgetAmount;

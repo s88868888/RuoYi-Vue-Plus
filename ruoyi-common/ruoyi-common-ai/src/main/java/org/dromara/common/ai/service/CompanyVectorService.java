@@ -374,6 +374,15 @@ public class CompanyVectorService {
     }
 
     /**
+     * 搜索租户下指定公司的所有相关信息（不限文档类型）
+     */
+    public List<VectorSearchResult> searchCompanyAllData(String tenantId, Long companyId,
+                                                         String query, int topK) {
+        String collectionName = vectorStoreService.getCollectionName();
+        return vectorStoreService.search(collectionName, query, tenantId, companyId, null, topK);
+    }
+
+    /**
      * 删除公司所有数据
      */
     public boolean deleteCompanyData(String tenantId, Long companyId) {

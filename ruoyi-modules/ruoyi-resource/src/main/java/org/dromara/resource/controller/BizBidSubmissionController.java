@@ -18,6 +18,7 @@ import org.dromara.common.web.core.BaseController;
 import org.dromara.resource.domain.bo.BizBidSubmissionBo;
 import org.dromara.resource.domain.vo.BidSubmissionProgressVo;
 import org.dromara.resource.domain.vo.BizBidSubmissionVo;
+import org.dromara.resource.domain.vo.BizSubmissionChapterVo;
 import org.dromara.resource.service.IBizBidSubmissionService;
 import org.springframework.validation.annotation.Validated;
 import org.springframework.web.bind.annotation.*;
@@ -121,15 +122,67 @@ public class BizBidSubmissionController extends BaseController {
     }
 
     /**
-     * 开始生成标书
+     * 第一步：保存公司关联和生成配置
+     *
+     * @param id 投标项目ID
+     * @param bo 配置信息
+     */
+    @SaCheckPermission("bid:submission:edit")
+    @Log(title = "投标项目", businessType = BusinessType.UPDATE)
+    @PostMapping("/{id}/step1/saveConfig")
+    public R<Void> saveStep1Config(@NotNull(message = "主键不能为空") @PathVariable Long id,
+                                    @RequestBody BizBidSubmissionBo bo) {
+        bo.setId(id);
+        return toAjax(bizBidSubmissionService.saveStep1Config(bo));
+    }
+
+    /**
+     * 第二步：生成章节结构
      *
      * @param id 投标项目ID
      */
     @SaCheckPermission("bid:submission:generate")
     @Log(title = "投标项目", businessType = BusinessType.UPDATE)
-    @PostMapping("/{id}/generate")
-    public R<Void> startGeneration(@NotNull(message = "主键不能为空") @PathVariable Long id) {
-        return toAjax(bizBidSubmissionService.startGeneration(id));
+    @PostMapping("/{id}/step2/generateStructure")
+    public R<Void> generateChapterStructure(@NotNull(message = "主键不能为空") @PathVariable Long id) {
+        return toAjax(bizBidSubmissionService.generateChapterStructure(id));
+    }
+
+    /**
+     * 第二步：获取章节树结构
+     *
+     * @param id 投标项目ID
+     */
+    @SaCheckPermission("bid:submission:query")
+    @GetMapping("/{id}/step2/chapterTree")
+    public R<List<BizSubmissionChapterVo>> getChapterTree(@NotNull(message = "主键不能为空") @PathVariable Long id) {
+        return R.ok(bizBidSubmissionService.getChapterTree(id));
+    }
+
+    /**
+     * 第二步：开始生成标书内容
+     *
+     * @param id 投标项目ID
+     */
+    @SaCheckPermission("bid:submission:generate")
+    @Log(title = "投标项目", businessType = BusinessType.UPDATE)
+    @PostMapping("/{id}/step2/generateContent")
+    public R<Void> startContentGeneration(@NotNull(message = "主键不能为空") @PathVariable Long id) {
+        return toAjax(bizBidSubmissionService.startContentGeneration(id));
+    }
+
+    /**
+     * 第三步：导出标书文件
+     *
+     * @param id 投标项目ID
+     * @param response HTTP响应
+     */
+    @SaCheckPermission("bid:submission:export")
+    @Log(title = "投标项目", businessType = BusinessType.EXPORT)
+    @GetMapping("/{id}/step3/export")
+    public void exportDocument(@NotNull(message = "主键不能为空") @PathVariable Long id,
+                                HttpServletResponse response) {
+        bizBidSubmissionService.exportDocument(id, response);
     }
 
     /**

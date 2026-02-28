@@ -54,7 +54,7 @@ public class BizBidSubmission extends TenantEntity {
     private String projectType;
 
     /**
-     * 预算金额（万元）
+     * 预算金额（元）
      */
     private BigDecimal budgetAmount;
 

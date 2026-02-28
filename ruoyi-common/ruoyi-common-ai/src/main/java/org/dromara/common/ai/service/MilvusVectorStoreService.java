@@ -15,8 +15,10 @@ import io.milvus.param.dml.DeleteParam;
 import io.milvus.param.dml.InsertParam;
 import io.milvus.param.dml.SearchParam;
 import io.milvus.param.index.CreateIndexParam;
+import io.milvus.response.SearchResultsWrapper;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import java.util.UUID;
 import org.dromara.common.ai.config.MilvusProperties;
 import org.dromara.common.ai.domain.VectorDocument;
 import org.dromara.common.ai.domain.VectorSearchResult;
@@ -101,7 +103,8 @@ public class MilvusVectorStoreService {
                     .build(),
                 FieldType.newBuilder()
                     .withName(FIELD_METADATA)
-                    .withDataType(DataType.JSON)
+                    .withDataType(DataType.VarChar)
+                    .withMaxLength(65535)
                     .build(),
                 FieldType.newBuilder()
                     .withName(FIELD_CREATE_TIME)
@@ -174,6 +177,9 @@ public class MilvusVectorStoreService {
                 return true;
             }
 
+            // 确保集合存在，不存在则自动创建
+            createCollection(collectionName);
+
             // 准备数据
             List<String> ids = new ArrayList<>();
             List<String> tenantIds = new ArrayList<>();
@@ -191,11 +197,11 @@ public class MilvusVectorStoreService {
                     doc.setVector(vector);
                 }
 
-                ids.add(doc.getId());
-                tenantIds.add(doc.getTenantId());
-                companyIds.add(doc.getCompanyId());
-                docTypes.add(doc.getDocType());
-                contents.add(doc.getContent());
+                ids.add(doc.getId() != null ? doc.getId() : UUID.randomUUID().toString());
+                tenantIds.add(doc.getTenantId() != null ? doc.getTenantId() : "");
+                companyIds.add(doc.getCompanyId() != null ? doc.getCompanyId() : 0L);
+                docTypes.add(doc.getDocType() != null ? doc.getDocType() : "");
+                contents.add(doc.getContent() != null ? doc.getContent() : "");
 
                 // 转换 float[] 为 List<Float>
                 List<Float> vectorList = new ArrayList<>();
@@ -299,11 +305,67 @@ public class MilvusVectorStoreService {
             List<VectorSearchResult> results = new ArrayList<>();
             SearchResults data = searchResult.getData();
             if (data != null && data.getResults() != null) {
-                data.getResults().getFieldsDataList().forEach(fieldData -> {
-                    // 这里需要根据实际返回的数据结构解析
-                    // Milvus SDK 的结果解析比较复杂，这里简化处理
-                    log.debug("搜索结果: {}", fieldData);
-                });
+                SearchResultsWrapper wrapper = new SearchResultsWrapper(data.getResults());
+
+                // 获取第一个查询向量的搜索结果数量
+                int resultCount = data.getResults().getScoresCount();
+                if (resultCount == 0) {
+                    return results;
+                }
+
+                for (int i = 0; i < resultCount; i++) {
+                    VectorSearchResult.VectorSearchResultBuilder builder = VectorSearchResult.builder()
+                        .score(data.getResults().getScores(i));
+
+                    try {
+                        List<?> idList = (List<?>) wrapper.getFieldData(FIELD_ID, 0);
+                        if (idList != null && i < idList.size()) {
+                            builder.id(String.valueOf(idList.get(i)));
+                        }
+                    } catch (Exception ignored) {}
+
+                    try {
+                        List<?> tenantList = (List<?>) wrapper.getFieldData(FIELD_TENANT_ID, 0);
+                        if (tenantList != null && i < tenantList.size()) {
+                            builder.tenantId(String.valueOf(tenantList.get(i)));
+                        }
+                    } catch (Exception ignored) {}
+
+                    try {
+                        List<?> companyList = (List<?>) wrapper.getFieldData(FIELD_COMPANY_ID, 0);
+                        if (companyList != null && i < companyList.size()) {
+                            builder.companyId(Long.parseLong(String.valueOf(companyList.get(i))));
+                        }
+                    } catch (Exception ignored) {}
+
+                    try {
+                        List<?> docTypeList = (List<?>) wrapper.getFieldData(FIELD_DOC_TYPE, 0);
+                        if (docTypeList != null && i < docTypeList.size()) {
+                            builder.docType(String.valueOf(docTypeList.get(i)));
+                        }
+                    } catch (Exception ignored) {}
+
+                    try {
+                        List<?> contentList = (List<?>) wrapper.getFieldData(FIELD_CONTENT, 0);
+                        if (contentList != null && i < contentList.size()) {
+                            builder.content(String.valueOf(contentList.get(i)));
+                        }
+                    } catch (Exception ignored) {}
+
+                    try {
+                        List<?> metadataJsonList = (List<?>) wrapper.getFieldData(FIELD_METADATA, 0);
+                        if (metadataJsonList != null && i < metadataJsonList.size()) {
+                            String metaJson = String.valueOf(metadataJsonList.get(i));
+                            @SuppressWarnings("unchecked")
+                            Map<String, Object> meta = new com.fasterxml.jackson.databind.ObjectMapper()
+                                .readValue(metaJson, Map.class);
+                            builder.metadata(meta);
+                        }
+                    } catch (Exception ignored) {}
+
+                    results.add(builder.build());
+                }
+                log.info("搜索到 {} 条结果", results.size());
             }
 
             return results;
@@ -346,6 +408,14 @@ public class MilvusVectorStoreService {
      */
     public boolean deleteByCompany(String collectionName, String tenantId, Long companyId) {
         try {
+            // 集合不存在时直接返回，无需删除
+            R<Boolean> hasCollection = milvusClient.hasCollection(
+                HasCollectionParam.newBuilder().withCollectionName(collectionName).build()
+            );
+            if (!hasCollection.getData()) {
+                return true;
+            }
+
             String expr = FIELD_TENANT_ID + " == \"" + tenantId + "\" && " +
                          FIELD_COMPANY_ID + " == " + companyId;
 
