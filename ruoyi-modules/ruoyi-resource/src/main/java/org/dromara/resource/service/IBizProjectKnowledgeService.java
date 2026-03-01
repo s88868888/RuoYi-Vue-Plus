@@ -4,6 +4,7 @@ import org.dromara.common.mybatis.core.page.PageQuery;
 import org.dromara.common.mybatis.core.page.TableDataInfo;
 import org.dromara.resource.domain.bo.BizProjectKnowledgeBo;
 import org.dromara.resource.domain.vo.BizProjectKnowledgeVo;
+import org.springframework.web.multipart.MultipartFile;
 
 import java.util.Collection;
 import java.util.List;
@@ -45,4 +46,9 @@ public interface IBizProjectKnowledgeService {
      * 校验并批量删除项目知识信息
      */
     Boolean deleteWithValidByIds(Collection<Long> ids, Boolean isValid);
+
+    /**
+     * 上传项目知识文档并向量化存储
+     */
+    Boolean uploadDocument(BizProjectKnowledgeBo bo, MultipartFile file);
 }

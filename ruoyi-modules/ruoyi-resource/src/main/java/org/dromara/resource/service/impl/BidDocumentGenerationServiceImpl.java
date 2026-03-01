@@ -7,12 +7,14 @@ import com.baomidou.mybatisplus.core.toolkit.Wrappers;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.dromara.resource.domain.BizBidSubmission;
+import org.dromara.resource.domain.BizDocumentConfig;
 import org.dromara.resource.domain.BizSubmissionDocument;
 import org.dromara.resource.domain.BizSubmissionDocumentLog;
 import org.dromara.resource.domain.bo.GenerationConfigBo;
 import org.dromara.resource.domain.vo.BidSubmissionProgressVo;
 import org.dromara.resource.domain.vo.BizSubmissionDocumentVo;
 import org.dromara.resource.mapper.BizBidSubmissionMapper;
+import org.dromara.resource.mapper.BizDocumentConfigMapper;
 import org.dromara.resource.mapper.BizSubmissionDocumentLogMapper;
 import org.dromara.resource.mapper.BizSubmissionDocumentMapper;
 import org.dromara.resource.service.IBidDocumentGenerationService;
@@ -38,6 +40,7 @@ public class BidDocumentGenerationServiceImpl implements IBidDocumentGenerationS
     private final BizBidSubmissionMapper submissionMapper;
     private final BizSubmissionDocumentMapper documentMapper;
     private final BizSubmissionDocumentLogMapper documentLogMapper;
+    private final BizDocumentConfigMapper documentConfigMapper;
 
     @Async("bidGenerationExecutor")
     @Override
@@ -51,8 +54,20 @@ public class BidDocumentGenerationServiceImpl implements IBidDocumentGenerationS
         }
 
         try {
-            // 1. 解析生成配置
-            List<GenerationConfigBo> configs = JSON.parseArray(submission.getGenerationConfig(), GenerationConfigBo.class);
+            // 1. 查询配置表中的配置
+            LambdaQueryWrapper<BizDocumentConfig> configWrapper = Wrappers.lambdaQuery();
+            configWrapper.eq(BizDocumentConfig::getBidSubmissionId, submissionId);
+            configWrapper.eq(BizDocumentConfig::getStatus, "active");
+            configWrapper.orderByAsc(BizDocumentConfig::getCompanyId, BizDocumentConfig::getDocumentType, BizDocumentConfig::getDocumentNo);
+            List<BizDocumentConfig> configs = documentConfigMapper.selectList(configWrapper);
+
+            if (configs.isEmpty()) {
+                log.warn("投标项目没有配置文档: {}", submissionId);
+                submission.setSubmissionStatus("failed");
+                submission.setErrorMessage("没有配置文档");
+                submissionMapper.updateById(submission);
+                return;
+            }
 
             // 2. 创建文档记录
             List<BizSubmissionDocument> documents = createDocumentRecords(submission, configs);
@@ -84,56 +99,40 @@ public class BidDocumentGenerationServiceImpl implements IBidDocumentGenerationS
     }
 
     /**
-     * 创建文档记录
+     * 创建文档记录（基于配置表）
      */
-    private List<BizSubmissionDocument> createDocumentRecords(BizBidSubmission submission, List<GenerationConfigBo> configs) {
+    private List<BizSubmissionDocument> createDocumentRecords(BizBidSubmission submission, List<BizDocumentConfig> configs) {
         List<BizSubmissionDocument> documents = new ArrayList<>();
 
-        for (GenerationConfigBo config : configs) {
-            // 创建商务标文档
-            for (int i = 1; i <= config.getCommercial(); i++) {
-                BizSubmissionDocument doc = createDocument(submission, config, "commercial", i);
-                documentMapper.insert(doc);
-                documents.add(doc);
-            }
-
-            // 创建技术标文档
-            for (int i = 1; i <= config.getTechnical(); i++) {
-                BizSubmissionDocument doc = createDocument(submission, config, "technical", i);
-                documentMapper.insert(doc);
-                documents.add(doc);
-            }
-
-            // 创建整本标书文档
-            for (int i = 1; i <= config.getComplete(); i++) {
-                BizSubmissionDocument doc = createDocument(submission, config, "complete", i);
-                documentMapper.insert(doc);
-                documents.add(doc);
-            }
+        for (BizDocumentConfig config : configs) {
+            BizSubmissionDocument doc = createDocument(submission, config);
+            documentMapper.insert(doc);
+            documents.add(doc);
         }
 
         return documents;
     }
 
     /**
-     * 创建单个文档记录
+     * 创建单个文档记录（基于配置表）
      */
-    private BizSubmissionDocument createDocument(BizBidSubmission submission, GenerationConfigBo config, String docType, int docNo) {
+    private BizSubmissionDocument createDocument(BizBidSubmission submission, BizDocumentConfig config) {
         BizSubmissionDocument doc = new BizSubmissionDocument();
         doc.setBidSubmissionId(submission.getId());
+        doc.setDocumentConfigId(config.getId());
         doc.setCompanyId(config.getCompanyId());
         doc.setCompanyName(config.getCompanyName());
 
-        String typeName = switch (docType) {
+        String typeName = switch (config.getDocumentType()) {
             case "commercial" -> "商务标";
             case "technical" -> "技术标";
             case "complete" -> "整本标书";
             default -> "标书";
         };
 
-        doc.setDocumentName(String.format("%s-%s-%s%d", submission.getProjectName(), config.getCompanyName(), typeName, docNo));
-        doc.setDocumentType(docType);
-        doc.setDocumentNo(docNo);
+        doc.setDocumentName(String.format("%s-%s-%s%d", submission.getProjectName(), config.getCompanyName(), typeName, config.getDocumentNo()));
+        doc.setDocumentType(config.getDocumentType());
+        doc.setDocumentNo(config.getDocumentNo());
         doc.setGenerationStatus("pending");
         doc.setGenerationProgress(0);
         doc.setVersion(1);

@@ -38,6 +38,11 @@ public class BizSubmissionDocument extends TenantEntity {
     private Long bidSubmissionId;
 
     /**
+     * 关联配置表ID
+     */
+    private Long documentConfigId;
+
+    /**
      * 公司ID
      */
     private Long companyId;

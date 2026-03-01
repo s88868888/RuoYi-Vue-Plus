@@ -17,6 +17,7 @@ import org.dromara.resource.domain.vo.BizProjectKnowledgeVo;
 import org.dromara.resource.service.IBizProjectKnowledgeService;
 import org.springframework.validation.annotation.Validated;
 import org.springframework.web.bind.annotation.*;
+import org.springframework.web.multipart.MultipartFile;
 
 import java.util.List;
 
@@ -89,6 +90,23 @@ public class BizProjectKnowledgeController extends BaseController {
     @DeleteMapping("/{ids}")
     public R<Void> remove(@NotEmpty(message = "主键不能为空") @PathVariable Long[] ids) {
         return toAjax(bizProjectKnowledgeService.deleteWithValidByIds(List.of(ids), true));
+    }
+
+    /**
+     * 上传项目知识文档
+     */
+    @Operation(summary = "上传项目知识文档")
+    @Log(title = "项目知识管理", businessType = BusinessType.INSERT)
+    @SaCheckPermission("resource:knowledge:add")
+    @PostMapping("/upload")
+    public R<BizProjectKnowledgeVo> uploadDocument(
+        @Validated BizProjectKnowledgeBo bo,
+        @RequestParam("file") MultipartFile file) {
+        Boolean result = bizProjectKnowledgeService.uploadDocument(bo, file);
+        if (result) {
+            return R.ok(bizProjectKnowledgeService.queryById(bo.getId()));
+        }
+        return R.fail("上传失败");
     }
 
 }
