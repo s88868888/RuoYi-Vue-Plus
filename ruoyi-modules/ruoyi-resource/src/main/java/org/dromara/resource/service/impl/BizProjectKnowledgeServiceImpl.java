@@ -11,6 +11,7 @@ import org.dromara.common.mybatis.core.page.PageQuery;
 import org.dromara.common.mybatis.core.page.TableDataInfo;
 import org.dromara.common.oss.core.OssClient;
 import org.dromara.common.oss.entity.UploadResult;
+import org.dromara.common.oss.factory.OssFactory;
 import org.dromara.common.satoken.utils.LoginHelper;
 import org.dromara.common.tenant.helper.TenantHelper;
 import org.dromara.resource.domain.BizProjectKnowledge;
@@ -40,7 +41,6 @@ public class BizProjectKnowledgeServiceImpl implements IBizProjectKnowledgeServi
     private final BizProjectKnowledgeMapper baseMapper;
     private final DocumentParserService documentParserService;
     private final CompanyVectorService companyVectorService;
-    private final OssClient ossClient;
 
     /**
      * 查询项目知识
@@ -134,6 +134,7 @@ public class BizProjectKnowledgeServiceImpl implements IBizProjectKnowledgeServi
             }
 
             // 2. 上传文件到 OSS
+            OssClient ossClient = OssFactory.instance();
             String suffix = filename.substring(filename.lastIndexOf("."));
             UploadResult uploadResult = ossClient.uploadSuffix(file.getInputStream(), suffix, file.getSize(), file.getContentType());
             bo.setAttachmentUrl(uploadResult.getUrl());
