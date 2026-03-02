@@ -57,6 +57,61 @@ public class BizDocumentConfigVo implements Serializable {
     private String status;
 
     /**
+     * 文档名称
+     */
+    private String documentName;
+
+    /**
+     * 生成状态：pending-待生成，generating-生成中，completed-已完成，failed-失败
+     */
+    private String generationStatus;
+
+    /**
+     * 生成进度 0-100
+     */
+    private Integer generationProgress;
+
+    /**
+     * 开始生成时间
+     */
+    private Date generationStartTime;
+
+    /**
+     * 生成结束时间
+     */
+    private Date generationEndTime;
+
+    /**
+     * 生成耗时（秒）
+     */
+    private Integer generationDuration;
+
+    /**
+     * 错误信息
+     */
+    private String errorMessage;
+
+    /**
+     * 生成的文件路径
+     */
+    private String filePath;
+
+    /**
+     * 文件大小（字节）
+     */
+    private Long fileSize;
+
+    /**
+     * 总章节数
+     */
+    private Integer totalChapters;
+
+    /**
+     * 已完成章节数
+     */
+    private Integer completedChapters;
+
+    /**
      * 备注
      */
     private String remark;

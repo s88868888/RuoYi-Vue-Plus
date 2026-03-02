@@ -140,4 +140,36 @@ public class BizSubmissionChapterController extends BaseController {
         return R.ok();
     }
 
+    /**
+     * AI 生成章节结构
+     *
+     * @param submissionId 投标项目ID
+     * @param documentConfigId 文档配置ID
+     */
+    @SaCheckPermission("bid:submission:generate")
+    @Log(title = "AI生成章节结构", businessType = BusinessType.INSERT)
+    @PostMapping("/generate-structure")
+    public R<Void> generateStructure(
+        @RequestParam @NotNull(message = "投标项目ID不能为空") Long submissionId,
+        @RequestParam @NotNull(message = "文档配置ID不能为空") Long documentConfigId) {
+        chapterService.generateChapterStructure(submissionId, documentConfigId);
+        return R.ok();
+    }
+
+    /**
+     * 重新生成章节结构
+     *
+     * @param submissionId 投标项目ID
+     * @param documentConfigId 文档配置ID
+     */
+    @SaCheckPermission("bid:submission:generate")
+    @Log(title = "重新生成章节结构", businessType = BusinessType.UPDATE)
+    @PostMapping("/regenerate-structure")
+    public R<Void> regenerateStructure(
+        @RequestParam @NotNull(message = "投标项目ID不能为空") Long submissionId,
+        @RequestParam @NotNull(message = "文档配置ID不能为空") Long documentConfigId) {
+        chapterService.regenerateChapterStructure(submissionId, documentConfigId);
+        return R.ok();
+    }
+
 }

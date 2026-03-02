@@ -73,4 +73,29 @@ public interface IBizSubmissionChapterService {
      */
     void addChapter(Long submissionDocumentId, Long parentId, String chapterTitle, String chapterType);
 
+    /**
+     * AI 生成章节结构（异步）
+     *
+     * @param submissionId 投标项目ID
+     * @param documentConfigId 文档配置ID
+     */
+    void generateChapterStructure(Long submissionId, Long documentConfigId);
+
+    /**
+     * 执行生成章节结构（内部异步方法）
+     *
+     * @param submissionId 投标项目ID
+     * @param documentConfigId 文档配置ID
+     * @param userId 用户ID
+     */
+    void doGenerateChapterStructure(Long submissionId, Long documentConfigId, Long userId);
+
+    /**
+     * 重新生成章节结构（异步）
+     *
+     * @param submissionId 投标项目ID
+     * @param documentConfigId 文档配置ID
+     */
+    void regenerateChapterStructure(Long submissionId, Long documentConfigId);
+
 }
