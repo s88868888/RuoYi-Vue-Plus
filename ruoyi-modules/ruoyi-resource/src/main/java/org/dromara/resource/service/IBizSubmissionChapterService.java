@@ -71,7 +71,7 @@ public interface IBizSubmissionChapterService {
      * @param parentId 父章节ID
      * @param chapterTitle 章节标题
      * @param chapterType 章节类型
-     * @param reasonDescription 章节说明
+     * @param reasonDescription 原因说明
      */
     void addChapter(Long submissionDocumentId, Long parentId, String chapterTitle, String chapterType, String reasonDescription);
 

@@ -144,7 +144,7 @@ public class BizSubmissionChapterController extends BaseController {
      * @param parentId 父章节ID
      * @param chapterTitle 章节标题
      * @param chapterType 章节类型
-     * @param reasonDescription 章节说明
+     * @param reasonDescription 原因说明
      */
     @SaCheckPermission("bid:submission:add")
     @Log(title = "标书章节", businessType = BusinessType.INSERT)
