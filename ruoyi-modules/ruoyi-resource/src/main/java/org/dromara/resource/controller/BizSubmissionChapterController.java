@@ -13,6 +13,7 @@ import org.springframework.validation.annotation.Validated;
 import org.springframework.web.bind.annotation.*;
 
 import java.util.List;
+import java.util.Map;
 
 /**
  * 标书章节管理Controller
@@ -121,12 +122,29 @@ public class BizSubmissionChapterController extends BaseController {
     }
 
     /**
+     * 清空文档下所有章节
+     *
+     * @param submissionId 投标项目ID
+     * @param documentId   文档配置ID
+     */
+    @SaCheckPermission("bid:submission:remove")
+    @Log(title = "清空章节目录", businessType = BusinessType.DELETE)
+    @DeleteMapping("/clear")
+    public R<Void> clearChapters(
+        @RequestParam @NotNull(message = "投标项目ID不能为空") Long submissionId,
+        @RequestParam @NotNull(message = "文档配置ID不能为空") Long documentId) {
+        chapterService.clearChapters(submissionId, documentId);
+        return R.ok();
+    }
+
+    /**
      * 添加章节
      *
      * @param submissionDocumentId 文档ID
      * @param parentId 父章节ID
      * @param chapterTitle 章节标题
      * @param chapterType 章节类型
+     * @param reasonDescription 章节说明
      */
     @SaCheckPermission("bid:submission:add")
     @Log(title = "标书章节", businessType = BusinessType.INSERT)
@@ -135,8 +153,9 @@ public class BizSubmissionChapterController extends BaseController {
         @RequestParam Long submissionDocumentId,
         @RequestParam Long parentId,
         @RequestParam String chapterTitle,
-        @RequestParam String chapterType) {
-        chapterService.addChapter(submissionDocumentId, parentId, chapterTitle, chapterType);
+        @RequestParam String chapterType,
+        @RequestParam(required = false) String reasonDescription) {
+        chapterService.addChapter(submissionDocumentId, parentId, chapterTitle, chapterType, reasonDescription);
         return R.ok();
     }
 
@@ -169,6 +188,19 @@ public class BizSubmissionChapterController extends BaseController {
         @RequestParam @NotNull(message = "投标项目ID不能为空") Long submissionId,
         @RequestParam @NotNull(message = "文档配置ID不能为空") Long documentConfigId) {
         chapterService.regenerateChapterStructure(submissionId, documentConfigId);
+        return R.ok();
+    }
+
+    /**
+     * 批量更新章节排序
+     *
+     * @param sortItems 排序列表，每项包含 id、parentId、sortOrder
+     */
+    @SaCheckPermission("bid:submission:edit")
+    @Log(title = "标书章节排序", businessType = BusinessType.UPDATE)
+    @PutMapping("/sort")
+    public R<Void> updateSort(@RequestBody List<Map<String, Object>> sortItems) {
+        chapterService.updateChapterSort(sortItems);
         return R.ok();
     }
 

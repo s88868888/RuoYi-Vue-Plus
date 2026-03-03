@@ -3,11 +3,13 @@
 sa-token:
   # 允许动态设置 token 有效期
   dynamic-active-timeout: true
-  # 允许从 请求参数 读取 token
+  # 是否尝试从请求体里读取token
   is-read-body: true
-  # 允许从 header 读取 token
+  # 是否尝试从header里读取token
   is-read-header: true
-  # 关闭 cookie 鉴权 从根源杜绝 csrf 漏洞风险
+  # 是否尝试从cookie里读取token
   is-read-cookie: false
+  # 是否尝试从请求参数里读取token（URL参数）
+  is-read-param: true
   # token前缀
   token-prefix: "Bearer"

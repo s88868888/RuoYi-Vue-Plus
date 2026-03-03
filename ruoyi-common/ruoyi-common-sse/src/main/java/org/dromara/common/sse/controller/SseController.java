@@ -3,7 +3,9 @@ package org.dromara.common.sse.controller;
 import cn.dev33.satoken.annotation.SaIgnore;
 import cn.dev33.satoken.stp.StpUtil;
 import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
 import org.dromara.common.core.domain.R;
+import org.dromara.common.core.domain.model.LoginUser;
 import org.dromara.common.satoken.utils.LoginHelper;
 import org.dromara.common.sse.core.SseEmitterManager;
 import org.springframework.beans.factory.DisposableBean;
@@ -18,6 +20,7 @@ import org.springframework.web.servlet.mvc.method.annotation.SseEmitter;
  *
  * @author Lion Li
  */
+@Slf4j
 @RestController
 @ConditionalOnProperty(value = "sse.enabled", havingValue = "true")
 @RequiredArgsConstructor
@@ -30,12 +33,39 @@ public class SseController implements DisposableBean {
      */
     @GetMapping(value = "${sse.path}", produces = MediaType.TEXT_EVENT_STREAM_VALUE)
     public SseEmitter connect() {
-        if (!StpUtil.isLogin()) {
+        log.info("收到SSE连接请求");
+
+        // 从请求参数中获取token
+        jakarta.servlet.http.HttpServletRequest request = org.dromara.common.core.utils.ServletUtils.getRequest();
+        String authParam = request.getParameter("Authorization");
+
+        if (authParam == null || authParam.isEmpty()) {
+            log.warn("SSE连接失败：未提供Authorization参数");
             return null;
         }
-        String tokenValue = StpUtil.getTokenValue();
-        Long userId = LoginHelper.getUserId();
-        return sseEmitterManager.connect(userId, tokenValue);
+
+        // 去掉 "Bearer " 前缀（如果有）
+        String token = authParam;
+        if (token.startsWith("Bearer ")) {
+            token = token.substring(7);
+        }
+
+        log.info("提取的token前8位: {}", token.substring(0, Math.min(8, token.length())));
+
+        // 使用token获取登录用户信息（标准方式）
+        LoginUser loginUser = LoginHelper.getLoginUser(token);
+        if (loginUser == null) {
+            log.warn("SSE连接失败：token无效或已过期");
+            return null;
+        }
+
+
+        Long userId = loginUser.getUserId();
+        log.info("SSE连接成功：userId={}, username={}", userId, loginUser.getUsername());
+
+        SseEmitter emitter = sseEmitterManager.connect(userId, token);
+        log.info("SseEmitter创建成功");
+        return emitter;
     }
 
     /**
