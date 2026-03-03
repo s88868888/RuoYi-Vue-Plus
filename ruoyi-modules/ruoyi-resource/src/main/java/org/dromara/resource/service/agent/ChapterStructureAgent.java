@@ -26,6 +26,36 @@ public class ChapterStructureAgent {
     private final AiChatService aiChatService;
 
     /**
+     * 生成章节结构（返回树形节点列表，供 Service 层递归持久化）
+     */
+    public List<ChapterNode> generateStructureNodes(
+        Long submissionId,
+        Long documentId,
+        DocumentParserAgent.ParseResult parseResult) {
+
+        log.info("开始生成章节结构（节点模式），submissionId: {}", submissionId);
+
+        try {
+            String structurePrompt = buildStructurePrompt(parseResult);
+            String structureJson = aiChatService.chat(structurePrompt);
+
+            // 清理 AI 返回值中可能包含的 markdown 代码块标记
+            structureJson = structureJson.trim();
+            if (structureJson.startsWith("```")) {
+                structureJson = structureJson.replaceAll("^```[a-zA-Z]*\\n?", "").replaceAll("```$", "").trim();
+            }
+
+            List<ChapterNode> nodes = JSON.parseArray(structureJson, ChapterNode.class);
+            log.info("章节结构节点生成完成，共{}个顶级节点", nodes != null ? nodes.size() : 0);
+            return nodes != null ? nodes : new ArrayList<>();
+
+        } catch (Exception e) {
+            log.error("生成章节结构节点失败", e);
+            throw new RuntimeException("生成章节结构节点失败: " + e.getMessage());
+        }
+    }
+
+    /**
      * 生成章节结构
      */
     public List<BizSubmissionChapter> generateStructure(

@@ -6,11 +6,14 @@ import lombok.extern.slf4j.Slf4j;
 import org.apache.pdfbox.Loader;
 import org.apache.pdfbox.pdmodel.PDDocument;
 import org.apache.pdfbox.text.PDFTextStripper;
+import org.apache.poi.xwpf.extractor.XWPFWordExtractor;
+import org.apache.poi.xwpf.usermodel.XWPFDocument;
 import org.dromara.common.ai.service.AiChatService;
 import org.dromara.resource.domain.BizBidProjectAttachment;
 import org.springframework.stereotype.Component;
 
 import java.io.File;
+import java.io.FileInputStream;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
@@ -98,14 +101,14 @@ public class DocumentParserAgent {
     }
 
     /**
-     * 提取Word文本
+     * 提取Word文本（使用 Apache POI）
      */
     private String extractWordText(String filePath) throws Exception {
-        // TODO: 使用Apache POI提取Word文本
-        // XWPFDocument document = new XWPFDocument(new FileInputStream(filePath));
-        // XWPFWordExtractor extractor = new XWPFWordExtractor(document);
-        // return extractor.getText();
-        return "";
+        try (FileInputStream fis = new FileInputStream(new File(filePath));
+             XWPFDocument document = new XWPFDocument(fis);
+             XWPFWordExtractor extractor = new XWPFWordExtractor(document)) {
+            return extractor.getText();
+        }
     }
 
     /**

@@ -20,8 +20,11 @@ import org.dromara.resource.domain.vo.BidSubmissionProgressVo;
 import org.dromara.resource.domain.vo.BizBidSubmissionVo;
 import org.dromara.resource.domain.vo.BizSubmissionChapterVo;
 import org.dromara.resource.service.IBizBidSubmissionService;
+import org.dromara.resource.service.SseProgressService;
+import org.springframework.http.MediaType;
 import org.springframework.validation.annotation.Validated;
 import org.springframework.web.bind.annotation.*;
+import org.springframework.web.servlet.mvc.method.annotation.SseEmitter;
 
 import java.util.List;
 
@@ -38,6 +41,7 @@ import java.util.List;
 public class BizBidSubmissionController extends BaseController {
 
     private final IBizBidSubmissionService bizBidSubmissionService;
+    private final SseProgressService sseProgressService;
 
     /**
      * 查询投标项目列表
@@ -218,6 +222,16 @@ public class BizBidSubmissionController extends BaseController {
     @PostMapping("/{id}/regenerate")
     public R<Void> regenerate(@NotNull(message = "主键不能为空") @PathVariable Long id) {
         return toAjax(bizBidSubmissionService.regenerate(id));
+    }
+
+    /**
+     * 订阅标书生成进度（SSE 推送）
+     *
+     * @param id 投标项目ID
+     */
+    @GetMapping(value = "/generation/progress/stream/{id}", produces = MediaType.TEXT_EVENT_STREAM_VALUE)
+    public SseEmitter progressStream(@NotNull(message = "主键不能为空") @PathVariable Long id) {
+        return sseProgressService.createEmitter(id);
     }
 
 }

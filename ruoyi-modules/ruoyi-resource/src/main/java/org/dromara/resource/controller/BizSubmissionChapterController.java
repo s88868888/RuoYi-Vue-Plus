@@ -3,17 +3,21 @@ package org.dromara.resource.controller;
 import cn.dev33.satoken.annotation.SaCheckPermission;
 import jakarta.validation.constraints.NotNull;
 import lombok.RequiredArgsConstructor;
+import org.dromara.common.ai.service.AiChatService;
 import org.dromara.common.core.domain.R;
 import org.dromara.common.log.annotation.Log;
 import org.dromara.common.log.enums.BusinessType;
 import org.dromara.common.web.core.BaseController;
 import org.dromara.resource.domain.vo.BizSubmissionChapterVo;
 import org.dromara.resource.service.IBizSubmissionChapterService;
+import org.springframework.http.MediaType;
 import org.springframework.validation.annotation.Validated;
 import org.springframework.web.bind.annotation.*;
+import org.springframework.web.servlet.mvc.method.annotation.SseEmitter;
 
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.CompletableFuture;
 
 /**
  * 标书章节管理Controller
@@ -28,6 +32,7 @@ import java.util.Map;
 public class BizSubmissionChapterController extends BaseController {
 
     private final IBizSubmissionChapterService chapterService;
+    private final AiChatService aiChatService;
 
     /**
      * 获取章节树
@@ -202,6 +207,33 @@ public class BizSubmissionChapterController extends BaseController {
     public R<Void> updateSort(@RequestBody List<Map<String, Object>> sortItems) {
         chapterService.updateChapterSort(sortItems);
         return R.ok();
+    }
+
+    /**
+     * AI 辅助写作接口（供 AiEditor 富文本编辑器调用，SSE 流式返回）
+     *
+     * @param body 包含 prompt 字段的请求体
+     */
+    @PostMapping(value = "/ai/assist", produces = MediaType.TEXT_EVENT_STREAM_VALUE)
+    public SseEmitter aiAssist(@RequestBody Map<String, String> body) {
+        String prompt = body.getOrDefault("prompt", "");
+        SseEmitter emitter = new SseEmitter(60_000L);
+
+        // 异步调用 AI，避免阻塞 HTTP 线程
+        CompletableFuture.runAsync(() -> {
+            try {
+                String result = aiChatService.chat(
+                    "你是一位专业的标书写作助手，请根据用户指令优化或续写内容，使用规范的商务中文，保持专业性。",
+                    prompt
+                );
+                emitter.send(SseEmitter.event().name("message").data(result));
+                emitter.complete();
+            } catch (Exception e) {
+                emitter.completeWithError(e);
+            }
+        });
+
+        return emitter;
     }
 
 }

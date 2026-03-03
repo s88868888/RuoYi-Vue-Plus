@@ -2,11 +2,14 @@ package org.dromara.resource.service.agent;
 
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.dromara.common.ai.domain.VectorSearchResult;
 import org.dromara.common.ai.service.AiChatService;
 import org.dromara.resource.domain.BizSubmissionChapter;
 import org.springframework.stereotype.Component;
 
+import java.util.List;
 import java.util.Map;
+import java.util.stream.Collectors;
 
 /**
  * 章节生成Agent
@@ -56,9 +59,17 @@ public class ChapterGenerationAgent {
     }
 
     /**
-     * 构建章节生成提示词
+     * 构建章节生成提示词（含 Milvus RAG 知识注入）
      */
     private String buildChapterPrompt(BizSubmissionChapter chapter, GenerationContext context) {
+        String knowledgeSection = "";
+        if (context.getRelevantKnowledge() != null && !context.getRelevantKnowledge().isEmpty()) {
+            knowledgeSection = "\n\n【相关知识库内容（公司历史案例/资质/人员信息）】\n"
+                + context.getRelevantKnowledge().stream()
+                    .map(VectorSearchResult::getContent)
+                    .collect(Collectors.joining("\n---\n"));
+        }
+
         return String.format("""
             请为投标项目生成"%s"章节的内容。
 
@@ -77,7 +88,7 @@ public class ChapterGenerationAgent {
 
             【评分标准】
             %s
-
+            %s
             【章节要求】
             章节编号：%s
             章节标题：%s
@@ -85,7 +96,7 @@ public class ChapterGenerationAgent {
 
             请生成专业、规范的标书内容，要求：
             1. 内容充实、逻辑清晰
-            2. 突出公司优势和项目经验
+            2. 突出公司优势和项目经验（结合上方知识库内容）
             3. 紧扣招标要求和评分标准
             4. 使用Markdown格式
             5. 包含必要的表格、列表等结构化内容
@@ -102,6 +113,7 @@ public class ChapterGenerationAgent {
             formatCompanyInfo(context.getCompanyInfo()),
             formatRequirements(context.getRequirements()),
             formatScoringCriteria(context.getScoringCriteria()),
+            knowledgeSection,
             chapter.getChapterNo(),
             chapter.getChapterTitle(),
             chapter.getChapterLevel()
@@ -198,6 +210,8 @@ public class ChapterGenerationAgent {
         private Map<String, String> companyInfo;
         private java.util.List<String> requirements;
         private Map<String, String> scoringCriteria;
+        /** Milvus 检索到的相关知识（每章节都检索一次） */
+        private java.util.List<VectorSearchResult> relevantKnowledge;
 
         // Getters and Setters
         public String getProjectName() { return projectName; }
@@ -216,6 +230,8 @@ public class ChapterGenerationAgent {
         public void setRequirements(java.util.List<String> requirements) { this.requirements = requirements; }
         public Map<String, String> getScoringCriteria() { return scoringCriteria; }
         public void setScoringCriteria(Map<String, String> scoringCriteria) { this.scoringCriteria = scoringCriteria; }
+        public java.util.List<VectorSearchResult> getRelevantKnowledge() { return relevantKnowledge; }
+        public void setRelevantKnowledge(java.util.List<VectorSearchResult> relevantKnowledge) { this.relevantKnowledge = relevantKnowledge; }
     }
 
 }
