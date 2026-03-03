@@ -115,6 +115,22 @@ public class BizSubmissionChapterController extends BaseController {
     }
 
     /**
+     * 一键生成所有章节内容
+     *
+     * @param submissionId     投标项目ID
+     * @param documentConfigId 文档配置ID
+     */
+    @SaCheckPermission("bid:submission:generate")
+    @Log(title = "一键生成章节内容", businessType = BusinessType.UPDATE)
+    @PostMapping("/generate-all")
+    public R<Void> generateAllChapters(
+        @RequestParam @NotNull(message = "投标项目ID不能为空") Long submissionId,
+        @RequestParam @NotNull(message = "文档配置ID不能为空") Long documentConfigId) {
+        chapterService.generateAllChapters(submissionId, documentConfigId);
+        return R.ok();
+    }
+
+    /**
      * 删除章节
      *
      * @param id 章节ID

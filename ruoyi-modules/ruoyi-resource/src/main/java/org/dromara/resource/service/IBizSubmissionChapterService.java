@@ -116,4 +116,31 @@ public interface IBizSubmissionChapterService {
      */
     void clearChapters(Long submissionId, Long documentId);
 
+    /**
+     * 异步生成单个章节内容（内部方法）
+     *
+     * @param chapterId 章节ID
+     * @param userId    用户ID
+     * @param tenantId  租户ID
+     */
+    void doGenerateChapterContent(Long chapterId, Long userId, String tenantId);
+
+    /**
+     * 一键生成所有章节内容
+     *
+     * @param submissionId     投标项目ID
+     * @param documentConfigId 文档配置ID
+     */
+    void generateAllChapters(Long submissionId, Long documentConfigId);
+
+    /**
+     * 异步执行批量生成（内部方法）
+     *
+     * @param submissionId     投标项目ID
+     * @param documentConfigId 文档配置ID
+     * @param userId           用户ID
+     * @param tenantId         租户ID
+     */
+    void doGenerateAllChapters(Long submissionId, Long documentConfigId, Long userId, String tenantId);
+
 }

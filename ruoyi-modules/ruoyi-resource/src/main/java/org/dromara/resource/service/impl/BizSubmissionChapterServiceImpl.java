@@ -92,10 +92,10 @@ public class BizSubmissionChapterServiceImpl implements IBizSubmissionChapterSer
         if (chapter == null) {
             return;
         }
-        chapter.setGenerationStatus("generating");
-        chapter.setGenerationProgress(0);
-        baseMapper.updateById(chapter);
-        log.info("开始生成章节内容，章节ID: {}", id);
+        Long userId = LoginHelper.getUserId();
+        String tenantId = TenantHelper.getTenantId();
+        SpringUtils.getBean(IBizSubmissionChapterService.class)
+            .doGenerateChapterContent(id, userId, tenantId);
     }
 
     @Override
@@ -128,12 +128,298 @@ public class BizSubmissionChapterServiceImpl implements IBizSubmissionChapterSer
         if (chapter == null) {
             return;
         }
-        chapter.setGenerationStatus("generating");
-        chapter.setGenerationProgress(0);
         chapter.setChapterContent(null);
         chapter.setErrorMessage(null);
+        chapter.setGenerationStatus("pending");
+        chapter.setGenerationProgress(0);
         baseMapper.updateById(chapter);
-        log.info("开始重新生成章节内容，章节ID: {}", id);
+        log.info("清空章节内容，准备重新生成，章节ID: {}", id);
+        generateChapter(id);
+    }
+
+    @Override
+    @Async
+    public void doGenerateChapterContent(Long chapterId, Long userId, String tenantId) {
+        TenantHelper.setDynamic(tenantId);
+        try {
+            // 1. 查询章节信息
+            BizSubmissionChapter chapter = baseMapper.selectById(chapterId);
+            if (chapter == null) {
+                log.warn("章节不存在，chapterId: {}", chapterId);
+                return;
+            }
+
+            // 2. 更新状态为生成中，发送 SSE
+            chapter.setGenerationStatus("generating");
+            chapter.setGenerationProgress(0);
+            chapter.setGenerationStartTime(new Date());
+            baseMapper.updateById(chapter);
+            SseMessageUtils.sendMessage(userId, buildChapterSseMessage("chapter_start", chapterId, "开始生成章节内容: " + chapter.getChapterTitle(), 0));
+
+            // 3. 查询关联信息：submission → project → 招标文件 URL
+            BizBidSubmission submission = submissionMapper.selectById(chapter.getBidSubmissionId());
+            if (submission == null) {
+                markChapterFailed(chapter, userId, "投标项目不存在");
+                return;
+            }
+            BizBidProject project = projectMapper.selectById(submission.getBidProjectId());
+            if (project == null) {
+                markChapterFailed(chapter, userId, "招标项目不存在");
+                return;
+            }
+            if (StrUtil.isBlank(project.getAttachments())) {
+                markChapterFailed(chapter, userId, "招标项目没有上传招标文件");
+                return;
+            }
+
+            // 获取招标文件 URL
+            String[] attachmentIds = project.getAttachments().split(",");
+            Long ossId = Long.parseLong(attachmentIds[0].trim());
+            SysOss sysOss = sysOssMapper.selectById(ossId);
+            if (sysOss == null || StrUtil.isBlank(sysOss.getUrl())) {
+                markChapterFailed(chapter, userId, "招标文件URL无效");
+                return;
+            }
+            String fileUrl = sysOss.getUrl();
+
+            // 4. 构建 prompt
+            String prompt = buildChapterContentPrompt(chapter, project, submission);
+
+            // 5. 调用 qwen-long 生成内容
+            SseMessageUtils.sendMessage(userId, buildChapterSseMessage("chapter_start", chapterId, "AI正在生成章节内容...", 30));
+            String content = aiChatService.chatWithDocumentUrl(fileUrl, prompt);
+
+            // 6. 保存内容，更新状态
+            Date endTime = new Date();
+            chapter.setChapterContent(content);
+            chapter.setGenerationStatus("completed");
+            chapter.setGenerationProgress(100);
+            chapter.setGenerationEndTime(endTime);
+            if (chapter.getGenerationStartTime() != null) {
+                chapter.setGenerationDuration((int) ((endTime.getTime() - chapter.getGenerationStartTime().getTime()) / 1000));
+            }
+            chapter.setAiModel("qwen-long-latest");
+            baseMapper.updateById(chapter);
+
+            // 7. 发送成功 SSE
+            SseMessageUtils.sendMessage(userId, buildChapterSseMessage("chapter_success", chapterId, "章节内容生成完成: " + chapter.getChapterTitle(), 100));
+            log.info("章节内容生成完成，chapterId: {}, title: {}", chapterId, chapter.getChapterTitle());
+
+        } catch (Exception e) {
+            log.error("生成章节内容异常，chapterId: {}", chapterId, e);
+            // 更新失败状态
+            try {
+                BizSubmissionChapter failChapter = baseMapper.selectById(chapterId);
+                if (failChapter != null) {
+                    markChapterFailed(failChapter, userId, "生成失败: " + e.getMessage());
+                }
+            } catch (Exception ex) {
+                log.error("更新失败状态异常", ex);
+            }
+        } finally {
+            TenantHelper.clearDynamic();
+        }
+    }
+
+    @Override
+    public void generateAllChapters(Long submissionId, Long documentConfigId) {
+        Long userId = LoginHelper.getUserId();
+        String tenantId = TenantHelper.getTenantId();
+        SpringUtils.getBean(IBizSubmissionChapterService.class)
+            .doGenerateAllChapters(submissionId, documentConfigId, userId, tenantId);
+    }
+
+    @Override
+    @Async
+    public void doGenerateAllChapters(Long submissionId, Long documentConfigId, Long userId, String tenantId) {
+        TenantHelper.setDynamic(tenantId);
+        try {
+            // 1. 查询所有叶子章节（没有子节点的章节）
+            LambdaQueryWrapper<BizSubmissionChapter> lqw = Wrappers.lambdaQuery();
+            lqw.eq(BizSubmissionChapter::getBidSubmissionId, submissionId);
+            lqw.eq(BizSubmissionChapter::getSubmissionDocumentId, documentConfigId);
+            lqw.orderByAsc(BizSubmissionChapter::getSortOrder);
+            List<BizSubmissionChapter> allChapters = baseMapper.selectList(lqw);
+
+            // 找出叶子节点（parentId 不被其他节点引用的节点）
+            java.util.Set<Long> parentIds = allChapters.stream()
+                .map(BizSubmissionChapter::getParentId)
+                .collect(Collectors.toSet());
+            List<BizSubmissionChapter> leafChapters = allChapters.stream()
+                .filter(c -> !parentIds.contains(c.getId()))
+                .collect(Collectors.toList());
+
+            int total = leafChapters.size();
+            if (total == 0) {
+                SseMessageUtils.sendMessage(userId, buildBatchSseMessage("batch_success", "没有需要生成的章节", 0, 0, 100, null));
+                return;
+            }
+
+            // 2. 发送批量开始 SSE
+            SseMessageUtils.sendMessage(userId, buildBatchSseMessage("batch_start", "开始批量生成章节内容", total, 0, 0, null));
+
+            // 3. 查询关联信息（只查一次）
+            BizBidSubmission submission = submissionMapper.selectById(submissionId);
+            if (submission == null) {
+                SseMessageUtils.sendMessage(userId, buildBatchSseMessage("batch_error", "投标项目不存在", 0, 0, 0, null));
+                return;
+            }
+            BizBidProject project = projectMapper.selectById(submission.getBidProjectId());
+            if (project == null) {
+                SseMessageUtils.sendMessage(userId, buildBatchSseMessage("batch_error", "招标项目不存在", 0, 0, 0, null));
+                return;
+            }
+            if (StrUtil.isBlank(project.getAttachments())) {
+                SseMessageUtils.sendMessage(userId, buildBatchSseMessage("batch_error", "招标项目没有上传招标文件", 0, 0, 0, null));
+                return;
+            }
+
+            String[] attachmentIds = project.getAttachments().split(",");
+            Long ossId = Long.parseLong(attachmentIds[0].trim());
+            SysOss sysOss = sysOssMapper.selectById(ossId);
+            if (sysOss == null || StrUtil.isBlank(sysOss.getUrl())) {
+                SseMessageUtils.sendMessage(userId, buildBatchSseMessage("batch_error", "招标文件URL无效", 0, 0, 0, null));
+                return;
+            }
+            String fileUrl = sysOss.getUrl();
+
+            // 4. 逐个生成（顺序执行，避免并发限制）
+            int current = 0;
+            for (BizSubmissionChapter chapter : leafChapters) {
+                current++;
+                int progress = (int) ((current * 100.0) / total);
+
+                try {
+                    // 发送进度 SSE
+                    SseMessageUtils.sendMessage(userId, buildBatchSseMessage("batch_progress",
+                        "正在生成: " + chapter.getChapterTitle(), total, current, progress, chapter.getId()));
+
+                    // 更新章节状态
+                    chapter.setGenerationStatus("generating");
+                    chapter.setGenerationProgress(0);
+                    chapter.setGenerationStartTime(new Date());
+                    baseMapper.updateById(chapter);
+
+                    // 构建 prompt 并调用 AI
+                    String prompt = buildChapterContentPrompt(chapter, project, submission);
+                    String content = aiChatService.chatWithDocumentUrl(fileUrl, prompt);
+
+                    // 保存内容
+                    Date endTime = new Date();
+                    chapter.setChapterContent(content);
+                    chapter.setGenerationStatus("completed");
+                    chapter.setGenerationProgress(100);
+                    chapter.setGenerationEndTime(endTime);
+                    if (chapter.getGenerationStartTime() != null) {
+                        chapter.setGenerationDuration((int) ((endTime.getTime() - chapter.getGenerationStartTime().getTime()) / 1000));
+                    }
+                    chapter.setAiModel("qwen-long-latest");
+                    baseMapper.updateById(chapter);
+
+                    // 发送单章节成功 SSE
+                    SseMessageUtils.sendMessage(userId, buildBatchSseMessage("batch_chapter_success",
+                        "章节生成完成: " + chapter.getChapterTitle(), total, current, progress, chapter.getId()));
+
+                } catch (Exception e) {
+                    log.error("批量生成中章节失败, chapterId: {}", chapter.getId(), e);
+                    markChapterFailed(chapter, userId, "生成失败: " + e.getMessage());
+                    // 单个失败不影响后续章节
+                }
+            }
+
+            // 5. 全部完成
+            SseMessageUtils.sendMessage(userId, buildBatchSseMessage("batch_success", "全部章节生成完成", total, total, 100, null));
+            log.info("批量章节内容生成完成，submissionId: {}, total: {}", submissionId, total);
+
+        } catch (Exception e) {
+            log.error("批量生成章节内容异常", e);
+            SseMessageUtils.sendMessage(userId, buildBatchSseMessage("batch_error", "批量生成异常: " + e.getMessage(), 0, 0, 0, null));
+        } finally {
+            TenantHelper.clearDynamic();
+        }
+    }
+
+    /**
+     * 标记章节为失败状态
+     */
+    private void markChapterFailed(BizSubmissionChapter chapter, Long userId, String errorMsg) {
+        chapter.setGenerationStatus("failed");
+        chapter.setGenerationProgress(0);
+        chapter.setErrorMessage(errorMsg);
+        baseMapper.updateById(chapter);
+        SseMessageUtils.sendMessage(userId, buildChapterSseMessage("chapter_error", chapter.getId(), errorMsg, 0));
+    }
+
+    /**
+     * 构建章节内容生成的 prompt
+     */
+    private String buildChapterContentPrompt(BizSubmissionChapter chapter, BizBidProject project, BizBidSubmission submission) {
+        return String.format("""
+            请基于上传的招标文件，为以下标书章节生成详细、专业的内容。
+
+            【项目信息】
+            - 项目名称：%s
+            - 招标单位：%s
+            - 项目类型：%s
+            - 预算金额：%s
+            - 项目描述：%s
+
+            【章节信息】
+            - 章节编号：%s
+            - 章节标题：%s
+            - 章节层级：第%d级
+            - 生成说明：%s
+
+            【生成要求】
+            1. 内容必须紧密结合招标文件中的具体要求
+            2. 内容充实、逻辑清晰、语言规范
+            3. 使用 HTML 格式输出（可使用 <h3>/<h4>/<p>/<ul>/<ol>/<li>/<table>/<tr>/<td>/<th>/<strong>/<em> 等标签）
+            4. 包含必要的表格、列表等结构化内容
+            5. 针对招标文件中的评分标准重点响应
+            6. 字数不少于800字
+            7. 不要包含章节标题本身（标题会自动添加）
+            8. 不要输出 Markdown 格式，请使用 HTML 格式
+
+            请直接输出章节内容。
+            """,
+            project.getProjectName(),
+            project.getBidOrg(),
+            project.getProjectType(),
+            project.getBudgetAmount(),
+            project.getProjectDesc() != null ? project.getProjectDesc() : "无",
+            chapter.getChapterNo(),
+            chapter.getChapterTitle(),
+            chapter.getChapterLevel(),
+            chapter.getReasonDescription() != null ? chapter.getReasonDescription() : "无"
+        );
+    }
+
+    /**
+     * 构建章节内容 SSE 消息（单章节）
+     */
+    private String buildChapterSseMessage(String type, Long chapterId, String message, int progress) {
+        JSONObject json = new JSONObject();
+        json.set("type", type);
+        json.set("chapterId", chapterId);
+        json.set("message", message);
+        json.set("progress", progress);
+        return json.toString();
+    }
+
+    /**
+     * 构建批量生成 SSE 消息
+     */
+    private String buildBatchSseMessage(String type, String message, int total, int current, int progress, Long chapterId) {
+        JSONObject json = new JSONObject();
+        json.set("type", type);
+        json.set("message", message);
+        json.set("total", total);
+        json.set("current", current);
+        json.set("progress", progress);
+        if (chapterId != null) {
+            json.set("chapterId", chapterId);
+        }
+        return json.toString();
     }
 
     @Override
