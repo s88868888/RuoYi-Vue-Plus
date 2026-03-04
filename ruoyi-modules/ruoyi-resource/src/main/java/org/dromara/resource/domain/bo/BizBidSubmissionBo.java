@@ -132,6 +132,11 @@ public class BizBidSubmissionBo extends BaseEntity {
     private String errorMessage;
 
     /**
+     * 工作流阶段
+     */
+    private String workflowStage;
+
+    /**
      * 备注
      */
     private String remark;

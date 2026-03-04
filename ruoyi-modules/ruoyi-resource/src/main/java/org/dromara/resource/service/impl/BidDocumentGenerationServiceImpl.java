@@ -4,11 +4,10 @@ import cn.hutool.core.date.DateUtil;
 import com.alibaba.fastjson2.JSON;
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
 import com.baomidou.mybatisplus.core.toolkit.Wrappers;
-import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.dromara.common.ai.domain.VectorSearchResult;
 import org.dromara.common.ai.service.MilvusVectorStoreService;
-import org.dromara.resource.domain.BizBidProjectAttachment;
+import org.dromara.resource.domain.BizBidProject;
 import org.dromara.resource.domain.BizBidSubmission;
 import org.dromara.resource.domain.BizDocumentConfig;
 import org.dromara.resource.domain.BizSubmissionChapter;
@@ -16,12 +15,13 @@ import org.dromara.resource.domain.BizSubmissionDocument;
 import org.dromara.resource.domain.BizSubmissionDocumentLog;
 import org.dromara.resource.domain.vo.BidSubmissionProgressVo;
 import org.dromara.resource.domain.vo.BizSubmissionDocumentVo;
-import org.dromara.resource.mapper.BizBidProjectAttachmentMapper;
+import org.dromara.resource.mapper.BizBidProjectMapper;
 import org.dromara.resource.mapper.BizBidSubmissionMapper;
 import org.dromara.resource.mapper.BizDocumentConfigMapper;
 import org.dromara.resource.mapper.BizSubmissionChapterMapper;
 import org.dromara.resource.mapper.BizSubmissionDocumentLogMapper;
 import org.dromara.resource.mapper.BizSubmissionDocumentMapper;
+import org.dromara.resource.service.BidDocumentVectorService;
 import org.dromara.resource.service.IBidDocumentGenerationService;
 import org.dromara.resource.service.SseProgressService;
 import org.dromara.resource.service.agent.ChapterGenerationAgent;
@@ -29,6 +29,9 @@ import org.dromara.resource.service.agent.ChapterGenerationAgent.GenerationConte
 import org.dromara.resource.service.agent.ChapterStructureAgent;
 import org.dromara.resource.service.agent.CompanyInfoRetrievalAgent;
 import org.dromara.resource.service.agent.DocumentParserAgent;
+import org.dromara.system.domain.SysOss;
+import org.dromara.system.mapper.SysOssMapper;
+import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.scheduling.annotation.Async;
 import org.springframework.stereotype.Service;
 
@@ -39,6 +42,10 @@ import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.Executor;
+import java.util.concurrent.Semaphore;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.stream.Collectors;
 
 /**
@@ -49,14 +56,14 @@ import java.util.stream.Collectors;
  */
 @Slf4j
 @Service
-@RequiredArgsConstructor
 public class BidDocumentGenerationServiceImpl implements IBidDocumentGenerationService {
 
     private final BizBidSubmissionMapper submissionMapper;
     private final BizSubmissionDocumentMapper documentMapper;
     private final BizSubmissionDocumentLogMapper documentLogMapper;
     private final BizDocumentConfigMapper documentConfigMapper;
-    private final BizBidProjectAttachmentMapper attachmentMapper;
+    private final BizBidProjectMapper bidProjectMapper;
+    private final SysOssMapper sysOssMapper;
     private final BizSubmissionChapterMapper chapterMapper;
 
     private final DocumentParserAgent documentParserAgent;
@@ -64,7 +71,42 @@ public class BidDocumentGenerationServiceImpl implements IBidDocumentGenerationS
     private final ChapterGenerationAgent chapterGenerationAgent;
     private final CompanyInfoRetrievalAgent companyInfoRetrievalAgent;
     private final MilvusVectorStoreService milvusVectorStoreService;
+    private final BidDocumentVectorService bidDocumentVectorService;
     private final SseProgressService sseProgressService;
+    private final Executor bidGenerationExecutor;
+
+    public BidDocumentGenerationServiceImpl(
+        BizBidSubmissionMapper submissionMapper,
+        BizSubmissionDocumentMapper documentMapper,
+        BizSubmissionDocumentLogMapper documentLogMapper,
+        BizDocumentConfigMapper documentConfigMapper,
+        BizBidProjectMapper bidProjectMapper,
+        SysOssMapper sysOssMapper,
+        BizSubmissionChapterMapper chapterMapper,
+        DocumentParserAgent documentParserAgent,
+        ChapterStructureAgent chapterStructureAgent,
+        ChapterGenerationAgent chapterGenerationAgent,
+        CompanyInfoRetrievalAgent companyInfoRetrievalAgent,
+        MilvusVectorStoreService milvusVectorStoreService,
+        BidDocumentVectorService bidDocumentVectorService,
+        SseProgressService sseProgressService,
+        @Qualifier("bidGenerationExecutor") Executor bidGenerationExecutor) {
+        this.submissionMapper = submissionMapper;
+        this.documentMapper = documentMapper;
+        this.documentLogMapper = documentLogMapper;
+        this.documentConfigMapper = documentConfigMapper;
+        this.bidProjectMapper = bidProjectMapper;
+        this.sysOssMapper = sysOssMapper;
+        this.chapterMapper = chapterMapper;
+        this.documentParserAgent = documentParserAgent;
+        this.chapterStructureAgent = chapterStructureAgent;
+        this.chapterGenerationAgent = chapterGenerationAgent;
+        this.companyInfoRetrievalAgent = companyInfoRetrievalAgent;
+        this.milvusVectorStoreService = milvusVectorStoreService;
+        this.bidDocumentVectorService = bidDocumentVectorService;
+        this.sseProgressService = sseProgressService;
+        this.bidGenerationExecutor = bidGenerationExecutor;
+    }
 
     @Async("bidGenerationExecutor")
     @Override
@@ -103,21 +145,37 @@ public class BidDocumentGenerationServiceImpl implements IBidDocumentGenerationS
             // 4. 记录日志
             logProgress(submissionId, null, "初始化", 0, "文档记录创建完成，共" + documents.size() + "个文档");
 
-            // 5. 获取招标文件附件
-            LambdaQueryWrapper<BizBidProjectAttachment> attachmentWrapper = Wrappers.lambdaQuery();
-            attachmentWrapper.eq(BizBidProjectAttachment::getBidProjectId, submission.getBidProjectId());
-            attachmentWrapper.eq(BizBidProjectAttachment::getAttachmentType, "bid_doc");
-            attachmentWrapper.last("LIMIT 1");
-            BizBidProjectAttachment attachment = attachmentMapper.selectOne(attachmentWrapper);
+            // 5. 获取招标文件 OSS 信息
+            SysOss bidDocOss = getBidDocOss(submission.getBidProjectId());
 
-            if (attachment == null) {
+            if (bidDocOss == null) {
                 throw new RuntimeException("未找到招标文件附件，请先上传招标文件");
             }
 
             // 6. 解析招标文件
-            logProgress(submissionId, null, "解析", 5, "开始解析招标文件: " + attachment.getAttachmentName());
-            DocumentParserAgent.ParseResult parseResult = documentParserAgent.parse(attachment);
+            logProgress(submissionId, null, "解析", 5, "开始解析招标文件: " + bidDocOss.getOriginalName());
+            String fileFormat = bidDocOss.getFileSuffix() != null ? bidDocOss.getFileSuffix().replace(".", "") : "";
+            DocumentParserAgent.ParseResult parseResult = documentParserAgent.parse(
+                bidDocOss.getUrl(), fileFormat, bidDocOss.getOriginalName());
             logProgress(submissionId, null, "解析", 10, "招标文件解析完成");
+
+            // 6.5 全量存入Milvus（幂等：先清空再写入）
+            String tenantId = submission.getTenantId();
+            Long bidProjectId = submission.getBidProjectId();
+            try {
+                bidDocumentVectorService.clearProjectData(tenantId, bidProjectId);
+                bidDocumentVectorService.indexDocumentContent(tenantId, bidProjectId, parseResult.getContent());
+                bidDocumentVectorService.indexRequirements(tenantId, bidProjectId, parseResult.getRequirements());
+                bidDocumentVectorService.indexStructure(tenantId, bidProjectId, parseResult.getStructure());
+                bidDocumentVectorService.indexTemplates(tenantId, bidProjectId, parseResult.getTemplates());
+                if (parseResult.getScoringCriteria() != null && !parseResult.getScoringCriteria().isEmpty()) {
+                    bidDocumentVectorService.indexScoringCriteria(tenantId, bidProjectId,
+                        JSON.toJSONString(parseResult.getScoringCriteria()));
+                }
+                logProgress(submissionId, null, "索引", 12, "招标文件已入Milvus向量库");
+            } catch (Exception e) {
+                log.warn("招标文件入Milvus失败，不影响生成流程: {}", e.getMessage());
+            }
 
             submission.setGenerationProgress(10);
             submissionMapper.updateById(submission);
@@ -181,10 +239,10 @@ public class BidDocumentGenerationServiceImpl implements IBidDocumentGenerationS
         doc.setGenerationStatus("generating");
         documentMapper.updateById(doc);
 
-        // 生成章节结构（AI 分析招标文件）
+        // 生成章节结构（AI 分析招标文件，按文档类型区分目录）
         logProgress(submissionId, docId, "目录生成", 15, "开始生成章节结构: " + doc.getDocumentName());
         List<ChapterStructureAgent.ChapterNode> chapterNodes =
-            chapterStructureAgent.generateStructureNodes(submissionId, docId, parseResult);
+            chapterStructureAgent.generateStructureNodes(submissionId, docId, parseResult, config.getDocumentType());
 
         // 递归保存章节，确保 parent_id 正确
         List<BizSubmissionChapter> savedChapters = new ArrayList<>();
@@ -205,53 +263,70 @@ public class BidDocumentGenerationServiceImpl implements IBidDocumentGenerationS
             return;
         }
 
-        // 遍历叶子章节，逐一生成内容
-        int done = 0;
-        for (BizSubmissionChapter chapter : leafChapters) {
-            try {
-                chapter.setGenerationStatus("generating");
-                chapter.setGenerationStartTime(new Date());
-                chapterMapper.updateById(chapter);
+        // 并行生成叶子章节内容（Semaphore控制并发数=3）
+        Semaphore semaphore = new Semaphore(3);
+        AtomicInteger doneCount = new AtomicInteger(0);
+        List<Exception> errors = Collections.synchronizedList(new ArrayList<>());
 
-                if ("template".equals(chapter.getChapterType())) {
-                    // 模板章节：从 Milvus 检索公司信息填充占位符
-                    fillTemplateChapter(chapter, config.getCompanyId());
-                } else {
-                    // AI 生成章节：每章节单独检索 Milvus 知识库
-                    generateAiChapter(chapter, submission, config, parseResult);
+        List<CompletableFuture<Void>> futures = leafChapters.stream()
+            .map(chapter -> CompletableFuture.runAsync(() -> {
+                try {
+                    semaphore.acquire();
+
+                    chapter.setGenerationStatus("generating");
+                    chapter.setGenerationStartTime(new Date());
+                    chapterMapper.updateById(chapter);
+
+                    if ("template".equals(chapter.getChapterType())) {
+                        fillTemplateChapter(chapter, config.getCompanyId());
+                    } else {
+                        generateAiChapter(chapter, submission, config);
+                    }
+
+                    Date now = new Date();
+                    chapter.setGenerationStatus("completed");
+                    chapter.setGenerationProgress(100);
+                    chapter.setGenerationEndTime(now);
+                    if (chapter.getGenerationStartTime() != null) {
+                        long duration = (now.getTime() - chapter.getGenerationStartTime().getTime()) / 1000;
+                        chapter.setGenerationDuration((int) duration);
+                    }
+                    chapterMapper.updateById(chapter);
+
+                    int current = doneCount.incrementAndGet();
+                    int progress = 20 + (int) (current * 75.0 / total);
+
+                    synchronized (doc) {
+                        doc.setGenerationProgress(progress);
+                        documentMapper.updateById(doc);
+                    }
+                    synchronized (submission) {
+                        submission.setGenerationProgress(progress);
+                        submissionMapper.updateById(submission);
+                    }
+
+                    sseProgressService.push(submissionId, buildProgressEvent(submission, doc, chapter));
+                    logProgress(submissionId, docId, "章节生成", progress,
+                        "章节生成完成: " + chapter.getChapterNo() + " " + chapter.getChapterTitle()
+                            + " [" + current + "/" + total + "]");
+
+                } catch (Exception e) {
+                    log.error("生成章节失败: {} - {}", chapter.getChapterNo(), chapter.getChapterTitle(), e);
+                    chapter.setGenerationStatus("failed");
+                    chapter.setErrorMessage(e.getMessage());
+                    chapterMapper.updateById(chapter);
+                    errors.add(e);
+                    doneCount.incrementAndGet();
+                } finally {
+                    semaphore.release();
                 }
+            }, bidGenerationExecutor))
+            .toList();
 
-                Date now = new Date();
-                chapter.setGenerationStatus("completed");
-                chapter.setGenerationProgress(100);
-                chapter.setGenerationEndTime(now);
-                if (chapter.getGenerationStartTime() != null) {
-                    long duration = (now.getTime() - chapter.getGenerationStartTime().getTime()) / 1000;
-                    chapter.setGenerationDuration((int) duration);
-                }
-                chapterMapper.updateById(chapter);
+        CompletableFuture.allOf(futures.toArray(new CompletableFuture[0])).join();
 
-            } catch (Exception e) {
-                log.error("生成章节失败: {} - {}", chapter.getChapterNo(), chapter.getChapterTitle(), e);
-                chapter.setGenerationStatus("failed");
-                chapter.setErrorMessage(e.getMessage());
-                chapterMapper.updateById(chapter);
-            }
-
-            done++;
-            int progress = 20 + (int) (done * 75.0 / total);
-            doc.setGenerationProgress(progress);
-            documentMapper.updateById(doc);
-
-            submission.setGenerationProgress(progress);
-            submissionMapper.updateById(submission);
-
-            // 推送 SSE 进度
-            sseProgressService.push(submissionId, buildProgressEvent(submission, doc, chapter));
-
-            logProgress(submissionId, docId, "章节生成", progress,
-                "章节生成完成: " + chapter.getChapterNo() + " " + chapter.getChapterTitle()
-                    + " [" + done + "/" + total + "]");
+        if (!errors.isEmpty()) {
+            log.warn("文档生成中有 {} 个章节失败", errors.size());
         }
 
         // 文档标记为完成
@@ -298,18 +373,28 @@ public class BidDocumentGenerationServiceImpl implements IBidDocumentGenerationS
     }
 
     /**
-     * 使用 AI + Milvus RAG 生成章节内容
+     * 使用双重RAG生成章节内容（招标文件Milvus + 公司知识Milvus）
      */
     private void generateAiChapter(
         BizSubmissionChapter chapter,
         BizBidSubmission submission,
-        BizDocumentConfig config,
-        DocumentParserAgent.ParseResult parseResult) {
+        BizDocumentConfig config) {
 
-        // 从 Milvus 检索与当前章节最相关的知识
-        List<VectorSearchResult> knowledge = Collections.emptyList();
+        String tenantId = submission.getTenantId();
+
+        // RAG 1: 招标文件知识（从Milvus检索）
+        List<VectorSearchResult> bidDocKnowledge = Collections.emptyList();
         try {
-            knowledge = milvusVectorStoreService.search(
+            bidDocKnowledge = bidDocumentVectorService.searchAll(
+                tenantId, submission.getBidProjectId(), chapter.getChapterTitle(), 8);
+        } catch (Exception e) {
+            log.warn("Milvus 招标文件知识检索失败: {}", e.getMessage());
+        }
+
+        // RAG 2: 公司知识库（已有）
+        List<VectorSearchResult> companyKnowledge = Collections.emptyList();
+        try {
+            companyKnowledge = milvusVectorStoreService.search(
                 "company_" + config.getCompanyId(),
                 chapter.getChapterTitle(),
                 null,
@@ -318,12 +403,13 @@ public class BidDocumentGenerationServiceImpl implements IBidDocumentGenerationS
                 5
             );
         } catch (Exception e) {
-            log.warn("Milvus 知识检索失败，将不注入知识库内容继续生成: {}", e.getMessage());
+            log.warn("Milvus 公司知识检索失败: {}", e.getMessage());
         }
 
-        // 构建生成上下文
-        GenerationContext ctx = buildContext(submission, config, parseResult);
-        ctx.setRelevantKnowledge(knowledge);
+        // 构建生成上下文（从Milvus结果构建，不依赖ParseResult）
+        GenerationContext ctx = buildContextFromMilvus(submission, config, bidDocKnowledge);
+        ctx.setRelevantKnowledge(companyKnowledge);
+        ctx.setBidDocKnowledge(bidDocKnowledge);
 
         String content = chapterGenerationAgent.generateChapter(chapter, ctx);
         chapter.setChapterContent(content);
@@ -386,8 +472,48 @@ public class BidDocumentGenerationServiceImpl implements IBidDocumentGenerationS
     }
 
     /**
-     * 构建生成上下文
+     * 从Milvus检索结果构建生成上下文（双重RAG模式）
      */
+    private GenerationContext buildContextFromMilvus(
+        BizBidSubmission submission,
+        BizDocumentConfig config,
+        List<VectorSearchResult> bidDocKnowledge) {
+
+        GenerationContext ctx = new GenerationContext();
+        ctx.setProjectName(submission.getProjectName());
+        ctx.setBidOrg(submission.getBidOrg());
+        ctx.setProjectType(submission.getProjectType());
+        ctx.setBudgetAmount(submission.getBudgetAmount() != null
+            ? submission.getBudgetAmount().toPlainString() : "未知");
+        ctx.setProjectDesc(submission.getProjectDesc());
+        ctx.setDocumentType(config.getDocumentType());
+
+        // 从Milvus结果中提取requirements
+        List<String> requirements = bidDocKnowledge.stream()
+            .filter(r -> "requirement".equals(r.getDocType()))
+            .map(VectorSearchResult::getContent)
+            .toList();
+        ctx.setRequirements(requirements);
+
+        // 从Milvus结果中提取scoringCriteria
+        Map<String, String> scoring = new LinkedHashMap<>();
+        bidDocKnowledge.stream()
+            .filter(r -> "scoring".equals(r.getDocType()))
+            .forEach(r -> scoring.put(r.getContent(), ""));
+        ctx.setScoringCriteria(scoring);
+
+        Map<String, String> companyInfo = new LinkedHashMap<>();
+        companyInfo.put("company_name", config.getCompanyName());
+        ctx.setCompanyInfo(companyInfo);
+
+        return ctx;
+    }
+
+    /**
+     * 构建生成上下文
+     * @deprecated 使用 {@link #buildContextFromMilvus} 替代，基于Milvus检索结果构建
+     */
+    @Deprecated
     private GenerationContext buildContext(
         BizBidSubmission submission,
         BizDocumentConfig config,
@@ -547,8 +673,28 @@ public class BidDocumentGenerationServiceImpl implements IBidDocumentGenerationS
     @Override
     public void cancelGeneration(Long submissionId) {
         log.info("取消生成任务，submissionId: {}", submissionId);
-        // TODO: 后续实现取消任务的逻辑
         logProgress(submissionId, null, "取消", 0, "用户取消生成任务");
+    }
+
+    /**
+     * 获取招标项目关联的第一个 OSS 文件（招标文件附件）
+     */
+    private SysOss getBidDocOss(Long bidProjectId) {
+        BizBidProject project = bidProjectMapper.selectById(bidProjectId);
+        if (project == null || project.getAttachments() == null || project.getAttachments().isBlank()) {
+            return null;
+        }
+        String[] ossIdArr = project.getAttachments().split(",");
+        for (String ossIdStr : ossIdArr) {
+            try {
+                Long ossId = Long.parseLong(ossIdStr.trim());
+                SysOss oss = sysOssMapper.selectById(ossId);
+                if (oss != null) {
+                    return oss;
+                }
+            } catch (NumberFormatException ignored) {}
+        }
+        return null;
     }
 
     /**

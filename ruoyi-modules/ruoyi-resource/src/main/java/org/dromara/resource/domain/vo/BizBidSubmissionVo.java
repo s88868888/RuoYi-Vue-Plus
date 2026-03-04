@@ -150,6 +150,12 @@ public class BizBidSubmissionVo implements Serializable {
     private String errorMessage;
 
     /**
+     * 工作流阶段：pending_config-待配置，configured-已配置，structure_generated-结构已生成，
+     * generating-生成中，completed-已完成，failed-失败
+     */
+    private String workflowStage;
+
+    /**
      * 备注
      */
     @ExcelProperty(value = "备注")

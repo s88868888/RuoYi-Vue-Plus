@@ -140,6 +140,7 @@ public class BizBidSubmissionServiceImpl implements IBizBidSubmissionService {
 
         // 5. 初始化状态
         submission.setSubmissionStatus("draft");
+        submission.setWorkflowStage("pending_config");
         submission.setGenerationProgress(0);
         submission.setCompletedDocuments(0);
         submission.setFailedDocuments(0);
@@ -181,6 +182,7 @@ public class BizBidSubmissionServiceImpl implements IBizBidSubmissionService {
 
         // 更新状态为生成中
         submission.setSubmissionStatus("generating");
+        submission.setWorkflowStage("generating");
         submission.setGenerationProgress(0);
         submission.setStartTime(new Date());
         submission.setErrorMessage(null);
@@ -205,15 +207,19 @@ public class BizBidSubmissionServiceImpl implements IBizBidSubmissionService {
             throw new RuntimeException("投标项目不存在");
         }
 
+        // 如果已经不在生成中（可能异步任务已完成或已取消），直接返回成功
         if (!"generating".equals(submission.getSubmissionStatus())) {
-            throw new RuntimeException("投标项目未在生成中");
+            log.info("投标项目[{}]当前状态为'{}'，非生成中，无需取消", submissionId, submission.getSubmissionStatus());
+            return true;
         }
 
         // 取消生成任务
         documentGenerationService.cancelGeneration(submissionId);
 
-        // 更新状态
+        // 取消后回到：若有章节结构则 structure_generated，否则 configured
         submission.setSubmissionStatus("draft");
+        submission.setWorkflowStage("Y".equals(submission.getChapterStructureGenerated()) ? "structure_generated" : "configured");
+        submission.setGenerationProgress(0);
         submission.setEndTime(new Date());
         baseMapper.updateById(submission);
 
@@ -255,6 +261,12 @@ public class BizBidSubmissionServiceImpl implements IBizBidSubmissionService {
             int totalDocs = calculateTotalDocuments(bo.getGenerationConfig());
             submission.setTotalDocuments(totalDocs);
         }
+        // 标记为已配置阶段（若章节结构已生成则保持更高阶段）
+        if (!"structure_generated".equals(submission.getWorkflowStage())
+            && !"generating".equals(submission.getWorkflowStage())
+            && !"completed".equals(submission.getWorkflowStage())) {
+            submission.setWorkflowStage("configured");
+        }
         return baseMapper.updateById(submission) > 0;
     }
 
@@ -267,6 +279,7 @@ public class BizBidSubmissionServiceImpl implements IBizBidSubmissionService {
         }
         // TODO: 调用AI生成章节结构，暂时标记为已生成
         submission.setChapterStructureGenerated("Y");
+        submission.setWorkflowStage("structure_generated");
         baseMapper.updateById(submission);
         return true;
     }

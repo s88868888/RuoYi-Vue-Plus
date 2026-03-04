@@ -15,6 +15,7 @@ import org.dromara.resource.domain.BizCompanyInfo;
 import org.dromara.resource.mapper.BizBidProjectMapper;
 import org.dromara.resource.mapper.BizCompanyInfoMapper;
 import org.dromara.common.tenant.helper.TenantHelper;
+import org.dromara.resource.service.BidDocumentVectorService;
 import org.dromara.resource.service.IAiAnalysisService;
 import org.dromara.system.domain.SysDept;
 import org.dromara.system.domain.vo.SysOssVo;
@@ -48,6 +49,7 @@ public class AiAnalysisServiceImpl implements IAiAnalysisService {
     private final CompanyVectorService companyVectorService;
     private final BizCompanyInfoMapper companyInfoMapper;
     private final SysDeptMapper sysDeptMapper;
+    private final BidDocumentVectorService bidDocumentVectorService;
 
     /**
      * 默认分析提示词
@@ -180,6 +182,15 @@ public class AiAnalysisServiceImpl implements IAiAnalysisService {
                 .set(BizBidProject::getAiAnalysisResult, result)
                 .set(BizBidProject::getAiAnalysisStatus, "completed"));
 
+            // 同步存入Milvus
+            try {
+                String tenantId = project.getTenantId();
+                bidDocumentVectorService.clearProjectDataByType(tenantId, projectId, "ai_analysis");
+                bidDocumentVectorService.indexAiAnalysis(tenantId, projectId, result);
+            } catch (Exception ex) {
+                log.warn("AI分析结果同步Milvus失败，不影响主流程: {}", ex.getMessage());
+            }
+
             return result;
         } catch (Exception e) {
             log.error("AI分析失败", e);
@@ -228,6 +239,15 @@ public class AiAnalysisServiceImpl implements IAiAnalysisService {
                 .eq(BizBidProject::getId, projectId)
                 .set(BizBidProject::getScoringCriteria, result)
                 .set(BizBidProject::getScoringCriteriaStatus, "completed"));
+
+            // 同步存入Milvus
+            try {
+                String tenantId = project.getTenantId();
+                bidDocumentVectorService.clearProjectDataByType(tenantId, projectId, "scoring");
+                bidDocumentVectorService.indexScoringCriteria(tenantId, projectId, result);
+            } catch (Exception ex) {
+                log.warn("评分标准同步Milvus失败，不影响主流程: {}", ex.getMessage());
+            }
 
             return result;
         } catch (Exception e) {
@@ -291,6 +311,14 @@ public class AiAnalysisServiceImpl implements IAiAnalysisService {
                 wrapper.set(BizBidProject::getMatchDegree, bestScore);
             }
             bidProjectMapper.update(wrapper);
+
+            // 6. 同步存入Milvus
+            try {
+                bidDocumentVectorService.clearProjectDataByType(tenantId, projectId, "match_analysis");
+                bidDocumentVectorService.indexMatchAnalysis(tenantId, projectId, result);
+            } catch (Exception ex) {
+                log.warn("契合度分析同步Milvus失败，不影响主流程: {}", ex.getMessage());
+            }
 
             return result;
         } catch (Exception e) {

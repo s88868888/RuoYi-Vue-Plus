@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN" "http://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<mapper namespace="org.dromara.resource.mapper.BizSubmissionDocumentMapper">
+
+    <select id="selectLatestBySubmissionId" resultType="org.dromara.resource.domain.vo.BizSubmissionDocumentVo">
+        SELECT *
+        FROM biz_submission_document
+        WHERE bid_submission_id = #{submissionId}
+          AND is_latest = '1'
+          AND del_flag = '0'
+        ORDER BY document_no
+    </select>
+
+    <select id="selectVersionsByConfigId" resultType="org.dromara.resource.domain.vo.BizSubmissionDocumentVo">
+        SELECT *
+        FROM biz_submission_document
+        WHERE document_config_id = #{documentConfigId}
+          AND del_flag = '0'
+        ORDER BY version DESC
+    </select>
+
+</mapper>

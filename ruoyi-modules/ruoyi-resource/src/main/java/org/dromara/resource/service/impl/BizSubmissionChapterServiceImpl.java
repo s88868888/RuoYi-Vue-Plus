@@ -15,12 +15,10 @@ import org.dromara.common.satoken.utils.LoginHelper;
 import org.dromara.common.tenant.helper.TenantHelper;
 import org.dromara.common.sse.utils.SseMessageUtils;
 import org.dromara.resource.domain.BizBidProject;
-import org.dromara.resource.domain.BizBidProjectAttachment;
 import org.dromara.resource.domain.BizBidSubmission;
 import org.dromara.resource.domain.BizDocumentConfig;
 import org.dromara.resource.domain.BizSubmissionChapter;
 import org.dromara.resource.domain.vo.BizSubmissionChapterVo;
-import org.dromara.resource.mapper.BizBidProjectAttachmentMapper;
 import org.dromara.resource.mapper.BizBidProjectMapper;
 import org.dromara.resource.mapper.BizBidSubmissionMapper;
 import org.dromara.resource.mapper.BizDocumentConfigMapper;
@@ -55,7 +53,6 @@ public class BizSubmissionChapterServiceImpl implements IBizSubmissionChapterSer
     private final BizSubmissionChapterMapper baseMapper;
     private final BizBidSubmissionMapper submissionMapper;
     private final BizBidProjectMapper projectMapper;
-    private final BizBidProjectAttachmentMapper attachmentMapper;
     private final BizDocumentConfigMapper documentConfigMapper;
     private final SysOssMapper sysOssMapper;
     private final AiChatService aiChatService;
@@ -247,7 +244,7 @@ public class BizSubmissionChapterServiceImpl implements IBizSubmissionChapterSer
                 .collect(Collectors.toSet());
             List<BizSubmissionChapter> leafChapters = allChapters.stream()
                 .filter(c -> !parentIds.contains(c.getId()))
-                .collect(Collectors.toList());
+                .toList();
 
             int total = leafChapters.size();
             if (total == 0) {

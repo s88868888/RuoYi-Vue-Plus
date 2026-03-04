@@ -1,6 +1,6 @@
 package org.dromara.resource.service.impl;
 
-import com.alibaba.fastjson2.JSON;
+import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.dromara.resource.domain.*;
@@ -8,6 +8,8 @@ import org.dromara.resource.mapper.*;
 import org.dromara.resource.service.IBidDocumentGenerationService;
 import org.dromara.resource.service.agent.*;
 import org.dromara.resource.domain.vo.BidSubmissionProgressVo;
+import org.dromara.system.domain.SysOss;
+import org.dromara.system.mapper.SysOssMapper;
 import org.springframework.context.annotation.Primary;
 import org.springframework.scheduling.annotation.Async;
 import org.springframework.stereotype.Service;
@@ -39,7 +41,8 @@ public class BidDocumentGenerationServiceImplV2 implements IBidDocumentGeneratio
     private final BizBidSubmissionMapper submissionMapper;
     private final BizSubmissionDocumentMapper documentMapper;
     private final BizSubmissionChapterMapper chapterMapper;
-    private final BizBidProjectAttachmentMapper attachmentMapper;
+    private final BizBidProjectMapper bidProjectMapper;
+    private final SysOssMapper sysOssMapper;
     private final BizSubmissionDocumentLogMapper logMapper;
 
     // Agents
@@ -67,20 +70,18 @@ public class BidDocumentGenerationServiceImplV2 implements IBidDocumentGeneratio
             // ========== 步骤1: 解析招标文件 ==========
             logProgress(submissionId, null, "解析招标文件", 5, "开始解析招标文件");
 
-            BizBidProjectAttachment attachment = getAttachment(submission.getBidProjectId());
-            if (attachment == null) {
+            SysOss bidDocOss = getBidDocOss(submission.getBidProjectId());
+            if (bidDocOss == null) {
                 throw new RuntimeException("未找到招标文件附件，请先上传招标文件");
             }
 
-            DocumentParserAgent.ParseResult parseResult = documentParserAgent.parse(attachment);
+            DocumentParserAgent.ParseResult parseResult = documentParserAgent.parse(
+                bidDocOss.getUrl(),
+                bidDocOss.getFileSuffix() != null ? bidDocOss.getFileSuffix().replace(".", "") : "",
+                bidDocOss.getOriginalName()
+            );
 
-            // 保存解析结果
-            attachment.setParsedContent(parseResult.getContent());
-            attachment.setParsedStructure(parseResult.getStructure());
-            attachment.setExtractedTemplates(JSON.toJSONString(parseResult.getTemplates()));
-            attachment.setParseStatus("completed");
-            attachmentMapper.updateById(attachment);
-
+            // 保存解析结果（无需写回附件表，解析结果已在 ParseResult 中）
             logProgress(submissionId, null, "解析招标文件", 10,
                 String.format("招标文件解析完成，提取到%d个模板", parseResult.getTemplates().size()));
 
@@ -228,16 +229,24 @@ public class BidDocumentGenerationServiceImplV2 implements IBidDocumentGeneratio
     }
 
     /**
-     * 获取招标文件附件
+     * 获取招标项目关联的第一个 OSS 文件（招标文件附件）
      */
-    private BizBidProjectAttachment getAttachment(Long bidProjectId) {
-        return attachmentMapper.selectOne(
-            new com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper<BizBidProjectAttachment>()
-                .eq(BizBidProjectAttachment::getBidProjectId, bidProjectId)
-                .eq(BizBidProjectAttachment::getAttachmentType, "bid_doc")
-                .orderByDesc(BizBidProjectAttachment::getCreateTime)
-                .last("LIMIT 1")
-        );
+    private SysOss getBidDocOss(Long bidProjectId) {
+        BizBidProject project = bidProjectMapper.selectById(bidProjectId);
+        if (project == null || project.getAttachments() == null || project.getAttachments().isBlank()) {
+            return null;
+        }
+        String[] ossIdArr = project.getAttachments().split(",");
+        for (String ossIdStr : ossIdArr) {
+            try {
+                Long ossId = Long.parseLong(ossIdStr.trim());
+                SysOss oss = sysOssMapper.selectById(ossId);
+                if (oss != null) {
+                    return oss;
+                }
+            } catch (NumberFormatException ignored) {}
+        }
+        return null;
     }
 
     /**

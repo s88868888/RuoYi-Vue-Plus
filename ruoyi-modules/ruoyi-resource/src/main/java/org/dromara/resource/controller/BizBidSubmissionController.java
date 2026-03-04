@@ -17,15 +17,21 @@ import org.dromara.common.mybatis.core.page.TableDataInfo;
 import org.dromara.common.web.core.BaseController;
 import org.dromara.resource.domain.bo.BizBidSubmissionBo;
 import org.dromara.resource.domain.vo.BidSubmissionProgressVo;
+import org.dromara.resource.domain.vo.BizBidProjectAttachmentVo;
+import org.dromara.resource.domain.vo.BizBidProjectVo;
 import org.dromara.resource.domain.vo.BizBidSubmissionVo;
 import org.dromara.resource.domain.vo.BizSubmissionChapterVo;
+import org.dromara.resource.service.IBizBidProjectService;
 import org.dromara.resource.service.IBizBidSubmissionService;
 import org.dromara.resource.service.SseProgressService;
+import org.dromara.system.domain.vo.SysOssVo;
+import org.dromara.system.service.ISysOssService;
 import org.springframework.http.MediaType;
 import org.springframework.validation.annotation.Validated;
 import org.springframework.web.bind.annotation.*;
 import org.springframework.web.servlet.mvc.method.annotation.SseEmitter;
 
+import java.util.ArrayList;
 import java.util.List;
 
 /**
@@ -42,6 +48,8 @@ public class BizBidSubmissionController extends BaseController {
 
     private final IBizBidSubmissionService bizBidSubmissionService;
     private final SseProgressService sseProgressService;
+    private final IBizBidProjectService bizBidProjectService;
+    private final ISysOssService sysOssService;
 
     /**
      * 查询投标项目列表
@@ -232,6 +240,49 @@ public class BizBidSubmissionController extends BaseController {
     @GetMapping(value = "/generation/progress/stream/{id}", produces = MediaType.TEXT_EVENT_STREAM_VALUE)
     public SseEmitter progressStream(@NotNull(message = "主键不能为空") @PathVariable Long id) {
         return sseProgressService.createEmitter(id);
+    }
+
+    /**
+     * 获取投标项目关联的招标文件附件列表
+     *
+     * @param id 投标项目ID（submissionId）
+     */
+    @SaCheckPermission("bid:submission:query")
+    @GetMapping("/{id}/attachments")
+    public R<List<BizBidProjectAttachmentVo>> getAttachments(@NotNull(message = "主键不能为空") @PathVariable Long id) {
+        // 查投标项目，获取关联的招标项目ID
+        BizBidSubmissionVo submission = bizBidSubmissionService.queryById(id);
+        if (submission == null || submission.getBidProjectId() == null) {
+            return R.ok(List.of());
+        }
+        // 查招标项目，获取 attachments（逗号分隔的 OSS ID）
+        BizBidProjectVo project = bizBidProjectService.queryById(submission.getBidProjectId());
+        if (project == null || cn.hutool.core.util.StrUtil.isBlank(project.getAttachments())) {
+            return R.ok(List.of());
+        }
+        // 解析 OSS ID 列表
+        String[] ossIdArr = project.getAttachments().split(",");
+        List<Long> ossIds = new ArrayList<>();
+        for (String ossIdStr : ossIdArr) {
+            try {
+                ossIds.add(Long.parseLong(ossIdStr.trim()));
+            } catch (NumberFormatException ignored) {}
+        }
+        if (ossIds.isEmpty()) {
+            return R.ok(List.of());
+        }
+        // 查 OSS 文件信息，转换为附件 VO
+        List<SysOssVo> ossList = sysOssService.listByIds(ossIds);
+        List<BizBidProjectAttachmentVo> result = new ArrayList<>();
+        for (SysOssVo oss : ossList) {
+            BizBidProjectAttachmentVo vo = new BizBidProjectAttachmentVo();
+            vo.setBidProjectId(project.getId());
+            vo.setAttachmentName(oss.getOriginalName());
+            vo.setFilePath(oss.getUrl());
+            vo.setFileFormat(oss.getFileSuffix() != null ? oss.getFileSuffix().replace(".", "") : "");
+            result.add(vo);
+        }
+        return R.ok(result);
     }
 
 }

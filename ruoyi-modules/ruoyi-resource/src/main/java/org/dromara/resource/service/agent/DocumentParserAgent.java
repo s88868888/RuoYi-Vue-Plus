@@ -9,11 +9,13 @@ import org.apache.pdfbox.text.PDFTextStripper;
 import org.apache.poi.xwpf.extractor.XWPFWordExtractor;
 import org.apache.poi.xwpf.usermodel.XWPFDocument;
 import org.dromara.common.ai.service.AiChatService;
-import org.dromara.resource.domain.BizBidProjectAttachment;
+import org.springframework.core.io.ByteArrayResource;
+import org.springframework.core.io.Resource;
 import org.springframework.stereotype.Component;
 
-import java.io.File;
-import java.io.FileInputStream;
+import java.io.ByteArrayInputStream;
+import java.io.InputStream;
+import java.net.URI;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
@@ -24,6 +26,7 @@ import java.util.regex.Pattern;
 /**
  * 文档解析Agent
  * 负责解析招标文件，提取要求、模板等信息
+ * 使用qwen-long传文件对象分析（不截断），本地提取全文用于Milvus分块
  *
  * @author ruoyi
  * @date 2026-02-26
@@ -37,29 +40,46 @@ public class DocumentParserAgent {
 
     /**
      * 解析招标文件
+     *
+     * @param ossUrl     OSS 文件访问 URL
+     * @param fileFormat 文件格式（pdf / docx / doc）
+     * @param fileName   文件名（用于日志）
      */
-    public ParseResult parse(BizBidProjectAttachment attachment) {
-        log.info("开始解析招标文件: {}", attachment.getAttachmentName());
+    public ParseResult parse(String ossUrl, String fileFormat, String fileName) {
+        log.info("开始解析招标文件: {}", fileName);
 
         try {
-            // 1. 提取文本内容
-            String content = extractText(attachment);
+            // 1. 下载文件为字节数组
+            byte[] fileBytes = URI.create(ossUrl).toURL().openStream().readAllBytes();
 
-            // 2. 使用AI分析文档结构
-            String structurePrompt = buildStructurePrompt(content);
-            String structureJson = aiChatService.chat(structurePrompt);
+            // 2. 构建文件Resource对象，传给qwen-long（不截断！）
+            Resource fileResource = new ByteArrayResource(fileBytes) {
+                @Override
+                public String getFilename() {
+                    return fileName;
+                }
+            };
 
-            // 3. 提取模板内容
-            List<TemplateInfo> templates = extractTemplates(content);
+            // 3. 文档结构分析（qwen-long读完整文件）
+            log.info("开始AI分析文档结构...");
+            String structureJson = aiChatService.chatWithDocument(fileResource, buildStructurePrompt());
 
-            // 4. 提取招标要求
-            List<String> requirements = extractRequirements(content);
+            // 4. 模板提取（qwen-long读完整文件）
+            log.info("开始AI提取模板...");
+            List<TemplateInfo> templates = extractTemplates(fileResource);
 
-            // 5. 提取评分标准
-            Map<String, String> scoringCriteria = extractScoringCriteria(content);
+            // 5. 本地提取全文（用于分块入Milvus + 正则提取要求）
+            String fullText = extractText(fileBytes, fileFormat);
+
+            // 6. 招标要求（正则提取）
+            List<String> requirements = extractRequirements(fullText);
+
+            // 7. 评分标准（qwen-long分析）
+            log.info("开始AI提取评分标准...");
+            Map<String, String> scoringCriteria = extractScoringCriteria(fileResource);
 
             ParseResult result = new ParseResult();
-            result.setContent(content);
+            result.setContent(fullText);
             result.setStructure(structureJson);
             result.setTemplates(templates);
             result.setRequirements(requirements);
@@ -75,16 +95,13 @@ public class DocumentParserAgent {
     }
 
     /**
-     * 提取文本内容
+     * 从字节数组提取文本内容（本地提取，用于Milvus分块和正则匹配）
      */
-    private String extractText(BizBidProjectAttachment attachment) throws Exception {
-        String filePath = attachment.getFilePath();
-        String fileFormat = attachment.getFileFormat();
-
+    private String extractText(byte[] bytes, String fileFormat) throws Exception {
         if ("pdf".equalsIgnoreCase(fileFormat)) {
-            return extractPdfText(filePath);
-        } else if ("docx".equalsIgnoreCase(fileFormat)) {
-            return extractWordText(filePath);
+            return extractPdfText(bytes);
+        } else if ("docx".equalsIgnoreCase(fileFormat) || "doc".equalsIgnoreCase(fileFormat)) {
+            return extractWordText(bytes);
         } else {
             throw new RuntimeException("不支持的文件格式: " + fileFormat);
         }
@@ -93,8 +110,8 @@ public class DocumentParserAgent {
     /**
      * 提取PDF文本
      */
-    private String extractPdfText(String filePath) throws Exception {
-        try (PDDocument document = Loader.loadPDF(new File(filePath))) {
+    private String extractPdfText(byte[] bytes) throws Exception {
+        try (PDDocument document = Loader.loadPDF(bytes)) {
             PDFTextStripper stripper = new PDFTextStripper();
             return stripper.getText(document);
         }
@@ -103,23 +120,20 @@ public class DocumentParserAgent {
     /**
      * 提取Word文本（使用 Apache POI）
      */
-    private String extractWordText(String filePath) throws Exception {
-        try (FileInputStream fis = new FileInputStream(new File(filePath));
-             XWPFDocument document = new XWPFDocument(fis);
+    private String extractWordText(byte[] bytes) throws Exception {
+        try (InputStream is = new ByteArrayInputStream(bytes);
+             XWPFDocument document = new XWPFDocument(is);
              XWPFWordExtractor extractor = new XWPFWordExtractor(document)) {
             return extractor.getText();
         }
     }
 
     /**
-     * 构建结构分析提示词
+     * 构建结构分析提示词（纯任务描述，不拼接文档内容，qwen-long自己读文件）
      */
-    private String buildStructurePrompt(String content) {
-        return String.format("""
-            请分析以下招标文件，提取文档结构信息。
-
-            招标文件内容：
-            %s
+    private String buildStructurePrompt() {
+        return """
+            请分析附件中的招标文件，提取文档结构信息。
 
             请以JSON格式返回以下信息：
             {
@@ -146,21 +160,17 @@ public class DocumentParserAgent {
             2. 如果章节需要投标人自行编写，type标记为generate
             3. 提取所有重要的招标要求
             4. 提取评分标准和权重
-            """, content.length() > 10000 ? content.substring(0, 10000) + "..." : content);
+            """;
     }
 
     /**
-     * 提取模板内容
+     * 提取模板内容（使用qwen-long读完整文件）
      */
-    private List<TemplateInfo> extractTemplates(String content) {
+    private List<TemplateInfo> extractTemplates(Resource fileResource) {
         List<TemplateInfo> templates = new ArrayList<>();
 
-        // 使用AI识别模板章节
-        String templatePrompt = String.format("""
-            请从以下招标文件中识别所有的模板章节（包含固定格式、范文示例的章节）。
-
-            招标文件内容：
-            %s
+        String templatePrompt = """
+            请从附件招标文件中识别所有的模板章节（包含固定格式、范文示例的章节）。
 
             请以JSON数组格式返回：
             [
@@ -176,10 +186,15 @@ public class DocumentParserAgent {
             1. 识别所有带下划线、空白框、需要填写的地方作为占位符
             2. 占位符用{{}}包裹，使用有意义的英文名称
             3. 保留模板的原始格式
-            """, content.length() > 10000 ? content.substring(0, 10000) + "..." : content);
+            """;
 
         try {
-            String templatesJson = aiChatService.chat(templatePrompt);
+            String templatesJson = aiChatService.chatWithDocument(fileResource, templatePrompt);
+            // 清理markdown代码块标记
+            templatesJson = templatesJson.trim();
+            if (templatesJson.startsWith("```")) {
+                templatesJson = templatesJson.replaceAll("^```[a-zA-Z]*\\n?", "").replaceAll("```$", "").trim();
+            }
             templates = JSON.parseArray(templatesJson, TemplateInfo.class);
         } catch (Exception e) {
             log.error("提取模板失败", e);
@@ -189,7 +204,7 @@ public class DocumentParserAgent {
     }
 
     /**
-     * 提取招标要求
+     * 提取招标要求（正则提取，使用本地全文）
      */
     private List<String> extractRequirements(String content) {
         List<String> requirements = new ArrayList<>();
@@ -206,17 +221,13 @@ public class DocumentParserAgent {
     }
 
     /**
-     * 提取评分标准
+     * 提取评分标准（使用qwen-long读完整文件）
      */
-    private Map<String, String> extractScoringCriteria(String content) {
+    private Map<String, String> extractScoringCriteria(Resource fileResource) {
         Map<String, String> criteria = new HashMap<>();
 
-        // 使用AI提取评分标准
-        String scoringPrompt = String.format("""
-            请从以下招标文件中提取评分标准。
-
-            招标文件内容：
-            %s
+        String scoringPrompt = """
+            请从附件招标文件中提取评分标准。
 
             请以JSON格式返回：
             {
@@ -225,10 +236,15 @@ public class DocumentParserAgent {
               "企业资质": "20分",
               "服务承诺": "10分"
             }
-            """, content.length() > 5000 ? content.substring(0, 5000) + "..." : content);
+            """;
 
         try {
-            String criteriaJson = aiChatService.chat(scoringPrompt);
+            String criteriaJson = aiChatService.chatWithDocument(fileResource, scoringPrompt);
+            // 清理markdown代码块标记
+            criteriaJson = criteriaJson.trim();
+            if (criteriaJson.startsWith("```")) {
+                criteriaJson = criteriaJson.replaceAll("^```[a-zA-Z]*\\n?", "").replaceAll("```$", "").trim();
+            }
             criteria = JSON.parseObject(criteriaJson, Map.class);
         } catch (Exception e) {
             log.error("提取评分标准失败", e);

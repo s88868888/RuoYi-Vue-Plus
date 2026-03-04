@@ -13,7 +13,7 @@ import java.util.stream.Collectors;
 
 /**
  * 章节生成Agent
- * 负责使用AI生成标书章节内容
+ * 负责使用AI生成标书章节内容，支持文档类型指引和双重RAG知识注入
  *
  * @author ruoyi
  * @date 2026-02-26
@@ -59,18 +59,38 @@ public class ChapterGenerationAgent {
     }
 
     /**
-     * 构建章节生成提示词（含 Milvus RAG 知识注入）
+     * 构建章节生成提示词（含文档类型指引 + 双重RAG知识注入）
      */
     private String buildChapterPrompt(BizSubmissionChapter chapter, GenerationContext context) {
-        String knowledgeSection = "";
+        // 文档类型指引
+        String typeGuide = switch (context.getDocumentType() != null ? context.getDocumentType() : "complete") {
+            case "commercial" -> "你正在生成商务标内容，侧重报价策略、资质展示、业绩亮点、合规性。";
+            case "technical" -> "你正在生成技术标内容，侧重技术方案深度、创新性、可行性、实施细节。";
+            default -> "你正在生成整本标书内容，需要平衡商务与技术内容。";
+        };
+
+        // 招标文件知识（从Milvus检索的bid_doc知识）
+        String bidDocSection = "";
+        if (context.getBidDocKnowledge() != null && !context.getBidDocKnowledge().isEmpty()) {
+            bidDocSection = "\n\n【招标文件相关内容】\n"
+                + context.getBidDocKnowledge().stream()
+                    .filter(r -> !"requirement".equals(r.getDocType()) && !"scoring".equals(r.getDocType()))
+                    .map(VectorSearchResult::getContent)
+                    .collect(Collectors.joining("\n---\n"));
+        }
+
+        // 公司知识库内容
+        String companyKnowledgeSection = "";
         if (context.getRelevantKnowledge() != null && !context.getRelevantKnowledge().isEmpty()) {
-            knowledgeSection = "\n\n【相关知识库内容（公司历史案例/资质/人员信息）】\n"
+            companyKnowledgeSection = "\n\n【公司知识库内容】\n"
                 + context.getRelevantKnowledge().stream()
                     .map(VectorSearchResult::getContent)
                     .collect(Collectors.joining("\n---\n"));
         }
 
         return String.format("""
+            %s
+
             请为投标项目生成"%s"章节的内容。
 
             【招标项目信息】
@@ -89,6 +109,7 @@ public class ChapterGenerationAgent {
             【评分标准】
             %s
             %s
+            %s
             【章节要求】
             章节编号：%s
             章节标题：%s
@@ -104,6 +125,7 @@ public class ChapterGenerationAgent {
 
             请直接输出章节内容，不要包含章节标题（标题会自动添加）。
             """,
+            typeGuide,
             chapter.getChapterTitle(),
             context.getProjectName(),
             context.getBidOrg(),
@@ -113,7 +135,8 @@ public class ChapterGenerationAgent {
             formatCompanyInfo(context.getCompanyInfo()),
             formatRequirements(context.getRequirements()),
             formatScoringCriteria(context.getScoringCriteria()),
-            knowledgeSection,
+            bidDocSection,
+            companyKnowledgeSection,
             chapter.getChapterNo(),
             chapter.getChapterTitle(),
             chapter.getChapterLevel()
@@ -210,8 +233,12 @@ public class ChapterGenerationAgent {
         private Map<String, String> companyInfo;
         private java.util.List<String> requirements;
         private Map<String, String> scoringCriteria;
-        /** Milvus 检索到的相关知识（每章节都检索一次） */
+        /** Milvus 检索到的公司相关知识（每章节都检索一次） */
         private java.util.List<VectorSearchResult> relevantKnowledge;
+        /** 文档类型：commercial/technical/complete */
+        private String documentType;
+        /** Milvus 检索到的招标文件知识 */
+        private java.util.List<VectorSearchResult> bidDocKnowledge;
 
         // Getters and Setters
         public String getProjectName() { return projectName; }
@@ -232,6 +259,10 @@ public class ChapterGenerationAgent {
         public void setScoringCriteria(Map<String, String> scoringCriteria) { this.scoringCriteria = scoringCriteria; }
         public java.util.List<VectorSearchResult> getRelevantKnowledge() { return relevantKnowledge; }
         public void setRelevantKnowledge(java.util.List<VectorSearchResult> relevantKnowledge) { this.relevantKnowledge = relevantKnowledge; }
+        public String getDocumentType() { return documentType; }
+        public void setDocumentType(String documentType) { this.documentType = documentType; }
+        public java.util.List<VectorSearchResult> getBidDocKnowledge() { return bidDocKnowledge; }
+        public void setBidDocKnowledge(java.util.List<VectorSearchResult> bidDocKnowledge) { this.bidDocKnowledge = bidDocKnowledge; }
     }
 
 }

@@ -455,6 +455,58 @@ public class MilvusVectorStoreService {
     }
 
     /**
+     * 删除整个collection
+     */
+    public boolean dropCollection(String collectionName) {
+        try {
+            R<Boolean> has = milvusClient.hasCollection(
+                HasCollectionParam.newBuilder().withCollectionName(collectionName).build());
+            if (!has.getData()) {
+                return true;
+            }
+
+            milvusClient.releaseCollection(
+                ReleaseCollectionParam.newBuilder().withCollectionName(collectionName).build());
+            R<RpcStatus> result = milvusClient.dropCollection(
+                DropCollectionParam.newBuilder().withCollectionName(collectionName).build());
+            boolean success = result.getStatus() == R.Status.Success.getCode();
+            if (success) {
+                log.info("成功删除collection: {}", collectionName);
+            }
+            return success;
+        } catch (Exception e) {
+            log.error("删除collection失败: {}", collectionName, e);
+            return false;
+        }
+    }
+
+    /**
+     * 按doc_type删除数据
+     */
+    public boolean deleteByDocType(String collectionName, String tenantId, String docType) {
+        try {
+            R<Boolean> has = milvusClient.hasCollection(
+                HasCollectionParam.newBuilder().withCollectionName(collectionName).build());
+            if (!has.getData()) {
+                return true;
+            }
+
+            String expr = FIELD_TENANT_ID + " == \"" + tenantId + "\" && "
+                + FIELD_DOC_TYPE + " == \"" + docType + "\"";
+            R<MutationResult> result = milvusClient.delete(
+                DeleteParam.newBuilder().withCollectionName(collectionName).withExpr(expr).build());
+            boolean success = result.getStatus() == R.Status.Success.getCode();
+            if (success) {
+                log.info("成功按类型删除数据: collection={}, tenantId={}, docType={}", collectionName, tenantId, docType);
+            }
+            return success;
+        } catch (Exception e) {
+            log.error("按类型删除数据失败: collection={}, docType={}", collectionName, docType, e);
+            return false;
+        }
+    }
+
+    /**
      * 获取集合名称
      */
     public String getCollectionName() {
