@@ -179,12 +179,31 @@ public class BizSubmissionChapterServiceImpl implements IBizSubmissionChapterSer
             }
             String fileUrl = sysOss.getUrl();
 
-            // 4. 构建 prompt
-            String prompt = buildChapterContentPrompt(chapter, project, submission);
+            // 4. 根据章节类型选择生成策略（template: 提取原文格式，generate: AI自由生成）
+            boolean isTemplateChapter = "template".equals(chapter.getChapterType());
+            String content;
+            String prompt;
 
-            // 5. 调用 qwen-long 生成内容
-            SseMessageUtils.sendMessage(userId, buildChapterSseMessage("chapter_start", chapterId, "AI正在生成章节内容...", 30));
-            String content = aiChatService.chatWithDocumentUrl(fileUrl, prompt);
+            if (isTemplateChapter) {
+                // 尝试从招标文件提取规定格式原文
+                prompt = buildTemplateExtractPrompt(chapter, project, submission);
+                SseMessageUtils.sendMessage(userId, buildChapterSseMessage("chapter_start", chapterId, "正在提取招标文件规定格式...", 30));
+                content = aiChatService.chatWithDocumentUrl(fileUrl, prompt);
+
+                // 提取失败时自动降级为 AI 生成
+                if (StrUtil.isBlank(content)) {
+                    log.warn("模板提取为空，自动降级为AI生成，chapterId: {}, title: {}", chapterId, chapter.getChapterTitle());
+                    chapter.setChapterType("generate");
+                    baseMapper.updateById(chapter);
+                    SseMessageUtils.sendMessage(userId, buildChapterSseMessage("chapter_start", chapterId, "未提取到规定格式，改为AI生成...", 50));
+                    prompt = buildChapterContentPrompt(chapter, project, submission);
+                    content = aiChatService.chatWithDocumentUrl(fileUrl, prompt);
+                }
+            } else {
+                prompt = buildChapterContentPrompt(chapter, project, submission);
+                SseMessageUtils.sendMessage(userId, buildChapterSseMessage("chapter_start", chapterId, "AI正在生成章节内容...", 30));
+                content = aiChatService.chatWithDocumentUrl(fileUrl, prompt);
+            }
 
             // 6. 保存内容，更新状态
             Date endTime = new Date();
@@ -288,8 +307,12 @@ public class BizSubmissionChapterServiceImpl implements IBizSubmissionChapterSer
 
                 try {
                     // 发送进度 SSE
+                    boolean isTemplate = "template".equals(chapter.getChapterType());
+                    String progressMsg = isTemplate
+                        ? "正在提取格式: " + chapter.getChapterTitle()
+                        : "正在生成: " + chapter.getChapterTitle();
                     SseMessageUtils.sendMessage(userId, buildBatchSseMessage("batch_progress",
-                        "正在生成: " + chapter.getChapterTitle(), total, current, progress, chapter.getId()));
+                        progressMsg, total, current, progress, chapter.getId()));
 
                     // 更新章节状态
                     chapter.setGenerationStatus("generating");
@@ -297,9 +320,24 @@ public class BizSubmissionChapterServiceImpl implements IBizSubmissionChapterSer
                     chapter.setGenerationStartTime(new Date());
                     baseMapper.updateById(chapter);
 
-                    // 构建 prompt 并调用 AI
-                    String prompt = buildChapterContentPrompt(chapter, project, submission);
-                    String content = aiChatService.chatWithDocumentUrl(fileUrl, prompt);
+                    // 根据章节类型选择生成策略（template: 提取原文格式，generate: AI自由生成）
+                    boolean isTemplateChapter = "template".equals(chapter.getChapterType());
+                    String prompt;
+                    String content;
+                    if (isTemplateChapter) {
+                        prompt = buildTemplateExtractPrompt(chapter, project, submission);
+                        content = aiChatService.chatWithDocumentUrl(fileUrl, prompt);
+                        if (StrUtil.isBlank(content)) {
+                            log.warn("批量生成中模板提取为空，自动降级为AI生成，chapterId: {}, title: {}", chapter.getId(), chapter.getChapterTitle());
+                            chapter.setChapterType("generate");
+                            baseMapper.updateById(chapter);
+                            prompt = buildChapterContentPrompt(chapter, project, submission);
+                            content = aiChatService.chatWithDocumentUrl(fileUrl, prompt);
+                        }
+                    } else {
+                        prompt = buildChapterContentPrompt(chapter, project, submission);
+                        content = aiChatService.chatWithDocumentUrl(fileUrl, prompt);
+                    }
 
                     // 保存内容
                     Date endTime = new Date();
@@ -392,6 +430,47 @@ public class BizSubmissionChapterServiceImpl implements IBizSubmissionChapterSer
     }
 
     /**
+     * 构建模板章节原文提取 prompt
+     */
+    private String buildTemplateExtractPrompt(BizSubmissionChapter chapter, BizBidProject project, BizBidSubmission submission) {
+        return String.format("""
+            请从上传的招标文件中，提取"%s"（章节编号：%s）的规定格式原文。
+
+            【项目信息】
+            - 项目名称：%s
+            - 招标单位：%s
+            - 项目类型：%s
+            - 预算金额：%s
+
+            【目标章节】
+            - 章节编号：%s
+            - 章节标题：%s
+            - 章节层级：第%d级
+
+            【提取要求（必须严格遵守）】
+            1. 必须直接复制招标文件中的原始格式内容，不得改写、扩写、润色
+            2. 保留原文中的固定文本、序号、下划线、空白框、日期位、签章位
+            3. 保留原有表格结构（使用 HTML table 标签输出）
+            4. 若章节包含“格式一/格式二/附表/模板/范本/样式”，需完整输出对应内容
+            5. 仅输出该章节的格式正文，不要输出章节标题，不要输出解释性文字
+            6. 输出格式必须是 HTML（可使用 <p>/<ul>/<ol>/<li>/<table>/<tr>/<td>/<th>/<strong>/<em> 等标签）
+            7. 若未找到对应规定格式，返回空字符串
+
+            请直接输出提取结果。
+            """,
+            chapter.getChapterTitle(),
+            chapter.getChapterNo(),
+            project.getProjectName(),
+            project.getBidOrg(),
+            project.getProjectType(),
+            project.getBudgetAmount(),
+            chapter.getChapterNo(),
+            chapter.getChapterTitle(),
+            chapter.getChapterLevel()
+        );
+    }
+
+    /**
      * 构建章节内容 SSE 消息（单章节）
      */
     private String buildChapterSseMessage(String type, Long chapterId, String message, int progress) {
@@ -417,6 +496,19 @@ public class BizSubmissionChapterServiceImpl implements IBizSubmissionChapterSer
             json.set("chapterId", chapterId);
         }
         return json.toString();
+    }
+
+    @Override
+    public void updateChapterType(Long id, String chapterType) {
+        if (!"template".equals(chapterType) && !"generate".equals(chapterType)) {
+            throw new ServiceException("章节类型非法，仅支持 template/generate");
+        }
+        BizSubmissionChapter chapter = baseMapper.selectById(id);
+        if (chapter == null) {
+            return;
+        }
+        chapter.setChapterType(chapterType);
+        baseMapper.updateById(chapter);
     }
 
     @Override
@@ -718,30 +810,50 @@ public class BizSubmissionChapterServiceImpl implements IBizSubmissionChapterSer
             5. 章节标题简洁明确
             6. 总输出控制在 7000 token 以内
             7. 3级及以下章节的 reasonDescription 可以为空字符串
+            8. 每个章节必须包含 chapterType 字段，取值为 "template" 或 "generate"：
+               - "template"：招标文件中已提供规定格式/固定模板的章节（例如：格式一、格式二、
+                 附表、投标函格式、法定代表人授权委托书格式、开标一览表、报价表格式、
+                 资格审查表、投标保证金格式等带有固定表格或固定文本的章节）
+               - "generate"：需要投标人自行编写的章节（例如：技术方案、实施计划、
+                 项目理解、人员配置、售后服务方案等需要根据项目情况撰写的章节）
+            9. 判断 chapterType 的关键依据：如果招标文件中该章节包含"格式"、"模板"、
+               "范本"、"样式"、"附表"、"按以下格式"、"参照以下格式"等字样，
+               或者包含需要填写的固定表格/固定文本框架，则标记为 "template"
 
             JSON Schema（必须严格遵守）：
             {
               "chapters": [
                 {
                   "chapterNo": "第一章",
-                  "chapterTitle": "章节标题",
+                  "chapterTitle": "投标函及投标函附录",
                   "chapterLevel": 1,
+                  "chapterType": "template",
                   "reasonDescription": "生成说明（1-2级必填，3级以下可为空）",
                   "children": [
                     {
                       "chapterNo": "1.1",
-                      "chapterTitle": "子章节标题",
+                      "chapterTitle": "投标函",
                       "chapterLevel": 2,
+                      "chapterType": "template",
                       "reasonDescription": "生成说明",
-                      "children": [
-                        {
-                          "chapterNo": "1.1.1",
-                          "chapterTitle": "三级章节标题",
-                          "chapterLevel": 3,
-                          "reasonDescription": "",
-                          "children": []
-                        }
-                      ]
+                      "children": []
+                    }
+                  ]
+                },
+                {
+                  "chapterNo": "第二章",
+                  "chapterTitle": "技术方案",
+                  "chapterLevel": 1,
+                  "chapterType": "generate",
+                  "reasonDescription": "生成说明",
+                  "children": [
+                    {
+                      "chapterNo": "2.1",
+                      "chapterTitle": "项目理解与需求分析",
+                      "chapterLevel": 2,
+                      "chapterType": "generate",
+                      "reasonDescription": "生成说明",
+                      "children": []
                     }
                   ]
                 }
@@ -806,7 +918,11 @@ public class BizSubmissionChapterServiceImpl implements IBizSubmissionChapterSer
         chapter.setChapterLevel(chapterJson.getInt("chapterLevel"));
         chapter.setReasonDescription(chapterJson.getStr("reasonDescription", ""));
         chapter.setSortOrder(sortOrder);
-        chapter.setChapterType("generate");
+        String chapterType = chapterJson.getStr("chapterType", "generate");
+        if (!"template".equals(chapterType) && !"generate".equals(chapterType)) {
+            chapterType = "generate";
+        }
+        chapter.setChapterType(chapterType);
         chapter.setGenerationStatus("pending");
         chapter.setGenerationProgress(0);
         chapter.setAiModel("qwen-long-latest");
@@ -843,7 +959,11 @@ public class BizSubmissionChapterServiceImpl implements IBizSubmissionChapterSer
         chapter.setChapterLevel(chapterJson.getInt("chapterLevel"));
         chapter.setReasonDescription(chapterJson.getStr("reasonDescription", ""));
         chapter.setSortOrder(sortOrder);
-        chapter.setChapterType("generate");
+        String chapterType = chapterJson.getStr("chapterType", "generate");
+        if (!"template".equals(chapterType) && !"generate".equals(chapterType)) {
+            chapterType = "generate";
+        }
+        chapter.setChapterType(chapterType);
         chapter.setGenerationStatus("pending");
         chapter.setGenerationProgress(0);
         chapter.setAiModel("qwen-long-latest");

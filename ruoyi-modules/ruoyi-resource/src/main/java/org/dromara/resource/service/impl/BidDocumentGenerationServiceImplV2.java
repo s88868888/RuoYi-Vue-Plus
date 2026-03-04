@@ -52,6 +52,7 @@ public class BidDocumentGenerationServiceImplV2 implements IBidDocumentGeneratio
     private final TemplateFillAgent templateFillAgent;
     private final ChapterGenerationAgent chapterGenerationAgent;
     private final DocumentAssemblyAgent documentAssemblyAgent;
+    private final ImageRetrievalAgent imageRetrievalAgent;
 
     @Async("bidGenerationExecutor")
     @Override
@@ -168,6 +169,9 @@ public class BidDocumentGenerationServiceImplV2 implements IBidDocumentGeneratio
                             // AI生成章节
                             content = chapterGenerationAgent.generateChapter(chapter, context);
                         }
+
+                        // 解析并替换图片占位符为真实图片
+                        content = imageRetrievalAgent.resolveImagePlaceholders(content, document.getCompanyId());
 
                         // 保存章节内容
                         chapter.setChapterContent(content);

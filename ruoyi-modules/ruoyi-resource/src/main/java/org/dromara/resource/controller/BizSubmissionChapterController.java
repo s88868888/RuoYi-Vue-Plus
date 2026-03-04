@@ -3,12 +3,21 @@ package org.dromara.resource.controller;
 import cn.dev33.satoken.annotation.SaCheckPermission;
 import jakarta.validation.constraints.NotNull;
 import lombok.RequiredArgsConstructor;
+import org.dromara.common.ai.domain.VectorSearchResult;
 import org.dromara.common.ai.service.AiChatService;
 import org.dromara.common.core.domain.R;
 import org.dromara.common.log.annotation.Log;
 import org.dromara.common.log.enums.BusinessType;
+import org.dromara.common.tenant.helper.TenantHelper;
 import org.dromara.common.web.core.BaseController;
+import org.dromara.resource.domain.BizBidSubmission;
+import org.dromara.resource.domain.BizSubmissionChapter;
+import org.dromara.resource.domain.vo.BizAiPromptTemplateVo;
 import org.dromara.resource.domain.vo.BizSubmissionChapterVo;
+import org.dromara.resource.mapper.BizBidSubmissionMapper;
+import org.dromara.resource.mapper.BizSubmissionChapterMapper;
+import org.dromara.resource.service.BidDocumentVectorService;
+import org.dromara.resource.service.IBizAiPromptTemplateService;
 import org.dromara.resource.service.IBizSubmissionChapterService;
 import org.springframework.http.MediaType;
 import org.springframework.validation.annotation.Validated;
@@ -33,6 +42,10 @@ public class BizSubmissionChapterController extends BaseController {
 
     private final IBizSubmissionChapterService chapterService;
     private final AiChatService aiChatService;
+    private final BidDocumentVectorService bidDocumentVectorService;
+    private final BizSubmissionChapterMapper chapterMapper;
+    private final BizBidSubmissionMapper submissionMapper;
+    private final IBizAiPromptTemplateService promptTemplateService;
 
     /**
      * 获取章节树
@@ -82,6 +95,22 @@ public class BizSubmissionChapterController extends BaseController {
     @PostMapping("/{id}/fill")
     public R<Void> fillTemplate(@NotNull(message = "章节ID不能为空") @PathVariable Long id) {
         chapterService.fillTemplate(id);
+        return R.ok();
+    }
+
+    /**
+     * 修改章节类型（template/generate）
+     *
+     * @param id 章节ID
+     * @param chapterType 章节类型
+     */
+    @SaCheckPermission("bid:submission:edit")
+    @Log(title = "标书章节", businessType = BusinessType.UPDATE)
+    @PutMapping("/{id}/type")
+    public R<Void> updateChapterType(
+        @NotNull(message = "章节ID不能为空") @PathVariable Long id,
+        @RequestParam String chapterType) {
+        chapterService.updateChapterType(id, chapterType);
         return R.ok();
     }
 
@@ -228,25 +257,68 @@ public class BizSubmissionChapterController extends BaseController {
     /**
      * AI 辅助写作接口（供 AiEditor 富文本编辑器调用，SSE 流式返回）
      *
-     * @param body 包含 prompt 字段的请求体
+     * @param body 包含 action、prompt、chapterId 字段的请求体
      */
     @PostMapping(value = "/ai/assist", produces = MediaType.TEXT_EVENT_STREAM_VALUE)
     public SseEmitter aiAssist(@RequestBody Map<String, String> body) {
-        String prompt = body.getOrDefault("prompt", "");
-        SseEmitter emitter = new SseEmitter(60_000L);
+        String action = body.getOrDefault("action", "polish");
+        String userText = body.getOrDefault("prompt", "");
+        String chapterIdStr = body.get("chapterId");
+        // 在请求线程（Sa-Token 上下文可用）提前解析租户 ID，再传入异步线程
+        String tenantId = TenantHelper.getTenantId();
 
-        // 异步调用 AI，避免阻塞 HTTP 线程
+        SseEmitter emitter = new SseEmitter(120_000L);
+
         CompletableFuture.runAsync(() -> {
-            try {
-                String result = aiChatService.chat(
-                    "你是一位专业的标书写作助手，请根据用户指令优化或续写内容，使用规范的商务中文，保持专业性。",
-                    prompt
-                );
-                emitter.send(SseEmitter.event().name("message").data(result));
-                emitter.complete();
-            } catch (Exception e) {
-                emitter.completeWithError(e);
-            }
+            // 异步线程无 Sa-Token HTTP 上下文，通过 TenantHelper.dynamic 手动注入租户
+            TenantHelper.dynamic(tenantId, () -> {
+                try {
+                    // 1. 从数据库读取系统提示词模板
+                    String templateType = "editor_" + action;
+                    List<BizAiPromptTemplateVo> templates = promptTemplateService.queryByType(templateType);
+                    String systemPrompt = templates.isEmpty()
+                        ? "你是一位专业的标书写作助手，请根据用户指令优化内容，使用规范商务中文，保持专业性，输出HTML格式。"
+                        : templates.get(0).getPromptContent();
+
+                    // 2. RAG：通过 chapterId 查找知识库
+                    StringBuilder context = new StringBuilder();
+                    if (chapterIdStr != null && !chapterIdStr.isBlank()) {
+                        try {
+                            Long chapterId = Long.parseLong(chapterIdStr);
+                            BizSubmissionChapter chapter = chapterMapper.selectById(chapterId);
+                            if (chapter != null) {
+                                BizBidSubmission submission = submissionMapper.selectById(chapter.getBidSubmissionId());
+                                if (submission != null) {
+                                    Long bidProjectId = submission.getBidProjectId();
+                                    List<VectorSearchResult> results = bidDocumentVectorService
+                                        .search(tenantId, bidProjectId, userText, null, 5);
+                                    if (!results.isEmpty()) {
+                                        context.append("【招标文件参考内容】\n");
+                                        for (VectorSearchResult r : results) {
+                                            context.append(r.getContent()).append("\n---\n");
+                                        }
+                                        context.append("\n");
+                                    }
+                                }
+                            }
+                        } catch (NumberFormatException ignored) {
+                            // chapterId 格式不合法时忽略 RAG，正常降级
+                        }
+                    }
+
+                    // 3. 拼装用户消息
+                    String finalUserMessage = context.isEmpty()
+                        ? userText
+                        : context + "【待处理文本】\n" + userText;
+
+                    // 4. 调用 AI
+                    String result = aiChatService.chat(systemPrompt, finalUserMessage);
+                    emitter.send(SseEmitter.event().name("message").data(result));
+                    emitter.complete();
+                } catch (Exception e) {
+                    emitter.completeWithError(e);
+                }
+            });
         });
 
         return emitter;

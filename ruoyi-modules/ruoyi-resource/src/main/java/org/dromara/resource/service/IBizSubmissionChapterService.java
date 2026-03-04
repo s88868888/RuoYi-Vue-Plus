@@ -117,6 +117,14 @@ public interface IBizSubmissionChapterService {
     void clearChapters(Long submissionId, Long documentId);
 
     /**
+     * 修改章节类型
+     *
+     * @param id 章节ID
+     * @param chapterType 章节类型（template/generate）
+     */
+    void updateChapterType(Long id, String chapterType);
+
+    /**
      * 异步生成单个章节内容（内部方法）
      *
      * @param chapterId 章节ID
