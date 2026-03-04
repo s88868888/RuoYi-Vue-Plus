@@ -40,12 +40,12 @@ public class ChapterGenerationAgent {
             String prompt = buildChapterPrompt(chapter, context);
 
             // 2. 调用AI生成
-            String content = aiChatService.chat(prompt);
+            String content = aiChatService.chatGenerate(prompt);
 
             // 3. 如果是大章节（level=1），生成原因说明
             if (chapter.getChapterLevel() == 1) {
                 String reasonPrompt = buildReasonPrompt(chapter, context);
-                String reason = aiChatService.chat(reasonPrompt);
+                String reason = aiChatService.chatGenerate(reasonPrompt);
                 content = reason + "\n\n" + content;
             }
 

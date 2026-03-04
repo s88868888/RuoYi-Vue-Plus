@@ -28,6 +28,8 @@ import java.util.List;
 import java.util.Map;
 import java.util.concurrent.CompletableFuture;
 
+import static cn.dev33.satoken.SaManager.log;
+
 /**
  * 标书章节管理Controller
  *
@@ -295,7 +297,12 @@ public class BizSubmissionChapterController extends BaseController {
                                     if (!results.isEmpty()) {
                                         context.append("【招标文件参考内容】\n");
                                         for (VectorSearchResult r : results) {
-                                            context.append(r.getContent()).append("\n---\n");
+                                            // 过滤掉 URL 和临时文件名，避免 DashScope 将其当作多模态资源解析报错
+                                            String content = r.getContent()
+                                                .replaceAll("https?://\\S+", "[链接已省略]")
+                                                .replaceAll("\\w+\\.tmp", "[文件已省略]")
+                                                .replaceAll("《[^》]*\\.tmp[^》]*》", "[文件已省略]");
+                                            context.append(content).append("\n---\n");
                                         }
                                         context.append("\n");
                                     }
@@ -312,6 +319,8 @@ public class BizSubmissionChapterController extends BaseController {
                         : context + "【待处理文本】\n" + userText;
 
                     // 4. 调用 AI
+                    log.info("[aiAssist] systemPrompt={}", systemPrompt);
+                    log.info("[aiAssist] finalUserMessage=", finalUserMessage);
                     String result = aiChatService.chat(systemPrompt, finalUserMessage);
                     emitter.send(SseEmitter.event().name("message").data(result));
                     emitter.complete();

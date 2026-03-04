@@ -201,7 +201,11 @@ public class MilvusVectorStoreService {
                 tenantIds.add(doc.getTenantId() != null ? doc.getTenantId() : "");
                 companyIds.add(doc.getCompanyId() != null ? doc.getCompanyId() : 0L);
                 docTypes.add(doc.getDocType() != null ? doc.getDocType() : "");
-                contents.add(doc.getContent() != null ? doc.getContent() : "");
+                // 清理临时文件名，避免 DashScope 将其当作多模态资源解析
+                String cleanContent = doc.getContent() != null ? doc.getContent()
+                    .replaceAll("https?://\\S+", "[链接已省略]")
+                    .replaceAll("\\w+\\.tmp", "[文件已省略]") : "";
+                contents.add(cleanContent);
 
                 // 转换 float[] 为 List<Float>
                 List<Float> vectorList = new ArrayList<>();

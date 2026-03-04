@@ -118,10 +118,14 @@ public class BizDocumentConfigServiceImpl implements IBizDocumentConfigService {
      * 同步更新父级投标项目的 workflowStage 和 selectedCompanies
      */
     private void syncSubmissionConfigStatus(Long submissionId) {
-        if (submissionId == null) return;
+        if (submissionId == null) {
+            return;
+        }
 
         BizBidSubmission submission = bidSubmissionMapper.selectById(submissionId);
-        if (submission == null) return;
+        if (submission == null) {
+            return;
+        }
 
         // 查询当前所有有效配置
         List<BizDocumentConfigVo> configs = queryBySubmissionId(submissionId);
@@ -129,8 +133,8 @@ public class BizDocumentConfigServiceImpl implements IBizDocumentConfigService {
         if (!configs.isEmpty()) {
             // 从配置中提取去重的公司列表
             List<Map<String, Object>> companyList = configs.stream()
-                .filter(c -> StringUtils.isNotBlank(c.getCompanyName()))
                 .map(BizDocumentConfigVo::getCompanyName)
+                .filter(StringUtils::isNotBlank)
                 .distinct()
                 .map(name -> {
                     Map<String, Object> map = new HashMap<>();

@@ -2,6 +2,7 @@ package org.dromara.common.tenant.helper;
 
 import cn.dev33.satoken.context.SaHolder;
 import cn.dev33.satoken.context.model.SaStorage;
+import cn.dev33.satoken.exception.SaTokenContextException;
 import cn.hutool.core.collection.CollectionUtil;
 import cn.hutool.core.convert.Convert;
 import cn.hutool.core.util.ObjectUtil;
@@ -115,6 +116,17 @@ public class TenantHelper {
         }
     }
 
+    /**
+     * 安全判断是否登录，异步线程中 Sa-Token 上下文不存在时返回 false
+     */
+    private static boolean isLoginSafely() {
+        try {
+            return LoginHelper.isLogin();
+        } catch (SaTokenContextException e) {
+            return false;
+        }
+    }
+
     public static void setDynamic(String tenantId) {
         setDynamic(tenantId, false);
     }
@@ -131,7 +143,7 @@ public class TenantHelper {
         if (!isEnable()) {
             return;
         }
-        if (!LoginHelper.isLogin() || !global) {
+        if (!isLoginSafely() || !global) {
             TEMP_DYNAMIC_TENANT.set(tenantId);
             return;
         }
@@ -149,7 +161,7 @@ public class TenantHelper {
         if (!isEnable()) {
             return null;
         }
-        if (!LoginHelper.isLogin()) {
+        if (!isLoginSafely()) {
             return TEMP_DYNAMIC_TENANT.get();
         }
         // 如果线程内有值 优先返回
@@ -176,7 +188,7 @@ public class TenantHelper {
         if (!isEnable()) {
             return;
         }
-        if (!LoginHelper.isLogin()) {
+        if (!isLoginSafely()) {
             TEMP_DYNAMIC_TENANT.remove();
             return;
         }

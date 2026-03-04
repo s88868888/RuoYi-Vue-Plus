@@ -8,6 +8,7 @@ import cn.dev33.satoken.router.SaRouter;
 import cn.dev33.satoken.stp.StpUtil;
 import cn.dev33.satoken.util.SaResult;
 import cn.dev33.satoken.util.SaTokenConsts;
+import jakarta.servlet.DispatcherType;
 import jakarta.servlet.http.HttpServletRequest;
 import jakarta.servlet.http.HttpServletResponse;
 import lombok.RequiredArgsConstructor;
@@ -49,6 +50,11 @@ public class SecurityConfig implements WebMvcConfigurer {
     public void addInterceptors(InterceptorRegistry registry) {
         // 注册路由拦截器，自定义验证规则
         registry.addInterceptor(new SaInterceptor(handler -> {
+                // 异步 dispatch（如 SSE）跳过 Sa-Token 验证，避免 ThreadLocal 上下文丢失报错
+                HttpServletRequest req = ServletUtils.getRequest();
+                if (req != null && req.getDispatcherType() == DispatcherType.ASYNC) {
+                    return;
+                }
                 AllUrlHandler allUrlHandler = SpringUtils.getBean(AllUrlHandler.class);
                 // 登录验证 -- 排除多个路径
                 SaRouter
