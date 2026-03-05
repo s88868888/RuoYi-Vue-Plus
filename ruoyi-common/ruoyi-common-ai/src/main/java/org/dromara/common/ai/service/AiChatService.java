@@ -1,7 +1,9 @@
 package org.dromara.common.ai.service;
 
 import com.alibaba.cloud.ai.advisor.DashScopeDocumentAnalysisAdvisor;
+import com.alibaba.cloud.ai.dashscope.api.DashScopeApi;
 import com.alibaba.cloud.ai.dashscope.chat.DashScopeChatOptions;
+import com.alibaba.cloud.ai.dashscope.chat.DashScopeChatModel;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.ai.chat.client.ChatClient;
 import org.springframework.ai.chat.prompt.Prompt;
@@ -14,6 +16,7 @@ import org.springframework.stereotype.Service;
 
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 
 /**
@@ -30,25 +33,44 @@ public class AiChatService {
 
     private final EmbeddingModel embeddingModel;
     private final ChatClient chatClient;
+    private final ChatClient multiModalChatClient;
     private final DashScopeDocumentAnalysisAdvisor documentAdvisor;
 
     public AiChatService(EmbeddingModel embeddingModel,
                          ChatClient.Builder chatClientBuilder,
-                         @Value("${spring.ai.dashscope.api-key}") String apiKey) {
+                         @Value("${spring.ai.dashscope.api-key}") String apiKey,
+                         @Value("${spring.ai.dashscope.base-url:}") String baseUrl,
+                         @Value("${spring.ai.dashscope.multimodal-completions-path:/api/v1/services/aigc/multimodal-generation/generation}") String multiModalCompletionsPath) {
         this.embeddingModel = embeddingModel;
         this.documentAdvisor = new DashScopeDocumentAnalysisAdvisor(new SimpleApiKey(apiKey));
         // 不注册为 defaultAdvisors，避免普通 chat 请求触发文档解析导致 URL 错误
         this.chatClient = chatClientBuilder.build();
+
+        DashScopeApi.Builder dashScopeApiBuilder = DashScopeApi.builder()
+            .apiKey(apiKey)
+            .completionsPath(multiModalCompletionsPath);
+        if (baseUrl != null && !baseUrl.isBlank()) {
+            dashScopeApiBuilder.baseUrl(baseUrl);
+        }
+        DashScopeChatModel multiModalChatModel = DashScopeChatModel.builder()
+            .dashScopeApi(dashScopeApiBuilder.build())
+            .defaultOptions(GENERATE_OPTIONS)
+            .build();
+        this.multiModalChatClient = ChatClient.builder(multiModalChatModel).build();
     }
 
     private static final DashScopeChatOptions CHAT_OPTIONS = DashScopeChatOptions.builder()
         .withModel("qwen-plus")
+        .withIncrementalOutput(true)
         .withTemperature(0.3)
         .withTopP(0.9)
         .build();
 
     private static final DashScopeChatOptions GENERATE_OPTIONS = DashScopeChatOptions.builder()
         .withModel("qwen3.5-plus")
+        .withMultiModel(true)
+        .withStream(true)
+        .withIncrementalOutput(true)
         .withTemperature(0.3)
         .withTopP(0.9)
         .build();
@@ -56,9 +78,12 @@ public class AiChatService {
     private static final DashScopeChatOptions DOC_OPTIONS = DashScopeChatOptions.builder()
         .withModel("qwen-long-latest")
         .withTemperature(0.3)
-        .withMaxToken(4000)
+        .withMaxToken(8192)
         .withTopP(0.8)
         .build();
+
+    private static final int CHAT_MESSAGE_MAX_LENGTH = 12000;
+    private static final int GENERATE_PROMPT_MAX_LENGTH = 24000;
 
     /**
      * 简单的文本对话（qwen-plus）
@@ -82,14 +107,7 @@ public class AiChatService {
      * @return AI 回复
      */
     public String chat(String systemPrompt, String userMessage) {
-        String cleanMessage = userMessage == null ? "" : userMessage
-            .replaceAll("https?://\\S+", "[链接已省略]")
-            .replaceAll("[\\w\\-]+\\.tmp", "[文件已省略]")
-            .replaceAll("oss://\\S+", "[文件已省略]")
-            .replaceAll("file://\\S+", "[文件已省略]");
-        if (cleanMessage.length() > 12000) {
-            cleanMessage = cleanMessage.substring(0, 12000) + "\n...(内容已截断)";
-        }
+        String cleanMessage = sanitizeDashScopeText(userMessage, CHAT_MESSAGE_MAX_LENGTH);
         log.info("[chat] systemPrompt={}", systemPrompt);
         log.info("[chat] cleanMessage length={}", cleanMessage.length());
         return chatClient.prompt()
@@ -141,11 +159,27 @@ public class AiChatService {
      * @return AI 回复
      */
     public String chatGenerate(String prompt) {
-        return chatClient.prompt()
-            .user(prompt)
-            .options(GENERATE_OPTIONS)
-            .call()
-            .content();
+        String cleanPrompt = sanitizeDashScopeText(prompt, GENERATE_PROMPT_MAX_LENGTH);
+        try {
+            return multiModalChatClient.prompt()
+                .user(cleanPrompt)
+                .options(GENERATE_OPTIONS)
+                .stream()
+                .content()
+                .collectList()
+                .map(parts -> String.join("", parts))
+                .block();
+        } catch (Exception e) {
+            if (isDashScopeUrlError(e) || isDashScopeIncrementalOutputError(e)) {
+                log.warn("qwen3.5-plus 调用参数不兼容（URL/增量输出），自动降级为 qwen-plus 文本生成: {}", e.getMessage());
+                return chatClient.prompt()
+                    .user(cleanPrompt)
+                    .options(CHAT_OPTIONS)
+                    .call()
+                    .content();
+            }
+            throw e;
+        }
     }
 
     /**
@@ -198,6 +232,43 @@ public class AiChatService {
      */
     public String chatWithDocumentUrl(String url, String userMessage) {
         return chatWithDocument(UrlResource.from(url), userMessage);
+    }
+
+    private String sanitizeDashScopeText(String input, int maxLength) {
+        String cleanText = input == null ? "" : input
+            .replaceAll("(?i)(https?|ftp|oss|file)://\\S+", "[链接已省略]")
+            .replaceAll("(?i)\\b[\\w\\-]+\\.tmp\\b", "[文件已省略]");
+        if (maxLength > 0 && cleanText.length() > maxLength) {
+            cleanText = cleanText.substring(0, maxLength) + "\n...(内容已截断)";
+        }
+        return cleanText;
+    }
+
+    private boolean isDashScopeUrlError(Exception exception) {
+        String allMessage = collectExceptionMessages(exception).toLowerCase(Locale.ROOT);
+        return allMessage.contains("invalidparameter")
+            && (allMessage.contains("url error") || allMessage.contains("error-url"));
+    }
+
+    private boolean isDashScopeIncrementalOutputError(Exception exception) {
+        String allMessage = collectExceptionMessages(exception).toLowerCase(Locale.ROOT);
+        return allMessage.contains("invalidparameter")
+            && allMessage.contains("incremental_output");
+    }
+
+    private String collectExceptionMessages(Throwable throwable) {
+        StringBuilder sb = new StringBuilder();
+        Throwable current = throwable;
+        while (current != null) {
+            if (current.getMessage() != null) {
+                if (!sb.isEmpty()) {
+                    sb.append(" | ");
+                }
+                sb.append(current.getMessage());
+            }
+            current = current.getCause();
+        }
+        return sb.toString();
     }
 
 }
