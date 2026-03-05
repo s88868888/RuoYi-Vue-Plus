@@ -226,7 +226,7 @@ public class BizBidSubmissionServiceImpl implements IBizBidSubmissionService {
 
         // 取消后回到：若有章节结构则 structure_generated，否则 configured
         submission.setSubmissionStatus("draft");
-        submission.setWorkflowStage("Y".equals(submission.getChapterStructureGenerated()) ? "structure_generated" : "configured");
+        submission.setWorkflowStage("1".equals(submission.getChapterStructureGenerated()) ? "structure_generated" : "configured");
         submission.setGenerationProgress(0);
         submission.setEndTime(new Date());
         baseMapper.updateById(submission);
@@ -286,7 +286,7 @@ public class BizBidSubmissionServiceImpl implements IBizBidSubmissionService {
             throw new RuntimeException("投标项目不存在");
         }
         // TODO: 调用AI生成章节结构，暂时标记为已生成
-        submission.setChapterStructureGenerated("Y");
+        submission.setChapterStructureGenerated("1");
         submission.setWorkflowStage("structure_generated");
         baseMapper.updateById(submission);
         return true;

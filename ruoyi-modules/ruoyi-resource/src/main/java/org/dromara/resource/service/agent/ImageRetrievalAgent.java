@@ -5,6 +5,8 @@ import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.dromara.resource.domain.*;
 import org.dromara.resource.mapper.*;
+import org.dromara.system.domain.SysOss;
+import org.dromara.system.mapper.SysOssMapper;
 import org.springframework.stereotype.Component;
 
 import java.util.ArrayList;
@@ -37,6 +39,7 @@ public class ImageRetrievalAgent {
     private final BizPerformanceMapper performanceMapper;
     private final BizPatentMedalMapper patentMedalMapper;
     private final BizFinanceInfoMapper financeInfoMapper;
+    private final SysOssMapper sysOssMapper;
 
     /** 占位符正则：{{IMAGE:TYPE:NAME}} */
     private static final Pattern PLACEHOLDER_PATTERN = Pattern.compile("\\{\\{IMAGE:(\\w+):(.+?)\\}\\}");
@@ -53,6 +56,8 @@ public class ImageRetrievalAgent {
             return content;
         }
 
+        log.info("开始解析图片占位符，deptId: {}, 内容长度: {}", deptId, content.length());
+
         Matcher matcher = PLACEHOLDER_PATTERN.matcher(content);
         StringBuilder result = new StringBuilder();
         int lastEnd = 0;
@@ -60,6 +65,8 @@ public class ImageRetrievalAgent {
         while (matcher.find()) {
             String type = matcher.group(1);
             String name = matcher.group(2).trim();
+
+            log.info("发现图片占位符: type={}, name={}, deptId={}", type, name, deptId);
 
             // 追加占位符之前的内容
             result.append(content, lastEnd, matcher.start());
@@ -106,6 +113,7 @@ public class ImageRetrievalAgent {
         }
 
         List<BizPersonnel> personnelList = personnelMapper.selectList(wrapper);
+        log.info("人员图片查询: name={}, deptId={}, 结果数量={}", name, deptId, personnelList.size());
         if (personnelList.isEmpty()) {
             return buildMissingHtml("PERSONNEL", name);
         }
@@ -145,6 +153,7 @@ public class ImageRetrievalAgent {
         }
 
         List<BizQualification> qualList = qualificationMapper.selectList(wrapper);
+        log.info("资质图片查询: name={}, deptId={}, 结果数量={}", name, deptId, qualList.size());
         if (qualList.isEmpty()) {
             return buildMissingHtml("QUALIFICATION", name);
         }
@@ -177,6 +186,7 @@ public class ImageRetrievalAgent {
         }
 
         List<BizPerformance> perfList = performanceMapper.selectList(wrapper);
+        log.info("业绩图片查询: name={}, deptId={}, 结果数量={}", name, deptId, perfList.size());
         if (perfList.isEmpty()) {
             return buildMissingHtml("PERFORMANCE", name);
         }
@@ -202,6 +212,7 @@ public class ImageRetrievalAgent {
         }
 
         List<BizPatentMedal> patentList = patentMedalMapper.selectList(wrapper);
+        log.info("专利图片查询: name={}, deptId={}, 结果数量={}", name, deptId, patentList.size());
         if (patentList.isEmpty()) {
             return buildMissingHtml("PATENT", name);
         }
@@ -230,6 +241,7 @@ public class ImageRetrievalAgent {
         }
 
         List<BizFinanceInfo> financeList = financeInfoMapper.selectList(wrapper);
+        log.info("财务图片查询: name={}, deptId={}, 结果数量={}", name, deptId, financeList.size());
         if (financeList.isEmpty()) {
             return buildMissingHtml("FINANCE", name);
         }
@@ -265,7 +277,8 @@ public class ImageRetrievalAgent {
     /**
      * 构建图片HTML
      */
-    private String buildImageHtml(String url, String caption) {
+    private String buildImageHtml(String urlOrOssId, String caption) {
+        String url = resolveOssUrl(urlOrOssId);
         return String.format("""
             <div class="chapter-image" style="text-align:center;margin:16px 0;">
               <img src="%s" alt="%s" style="max-width:80%%;border:1px solid #eee;border-radius:4px;display:block;margin:0 auto;" />
@@ -275,9 +288,35 @@ public class ImageRetrievalAgent {
     }
 
     /**
+     * 将OSS ID转换为可访问的URL
+     * 如果传入的是纯数字（OSS ID），从sys_oss表查询实际URL；否则原样返回
+     */
+    private String resolveOssUrl(String ossIdOrUrl) {
+        if (ossIdOrUrl == null || ossIdOrUrl.isBlank()) {
+            return ossIdOrUrl;
+        }
+        String value = ossIdOrUrl.trim();
+        // 纯数字视为 OSS ID
+        if (value.matches("\\d+")) {
+            try {
+                SysOss oss = sysOssMapper.selectById(Long.parseLong(value));
+                if (oss != null && oss.getUrl() != null && !oss.getUrl().isBlank()) {
+                    log.debug("OSS ID {} -> URL {}", value, oss.getUrl());
+                    return oss.getUrl();
+                }
+                log.warn("OSS记录不存在或URL为空, ossId: {}", value);
+            } catch (Exception e) {
+                log.warn("OSS ID解析失败: {}", value, e);
+            }
+        }
+        return value;
+    }
+
+    /**
      * 构建缺失图片占位HTML
      */
     private String buildMissingHtml(String type, String name) {
+        log.warn("图片缺失: type={}, name={}", type, name);
         return String.format(
             "<div class=\"missing-image\" data-type=\"%s\" data-name=\"%s\" " +
             "style=\"text-align:center;margin:16px 0;padding:20px;border:2px dashed #ffa940;border-radius:4px;background:#fff7e6;\">" +
