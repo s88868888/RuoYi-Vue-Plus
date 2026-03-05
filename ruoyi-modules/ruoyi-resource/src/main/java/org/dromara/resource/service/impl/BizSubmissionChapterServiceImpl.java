@@ -386,7 +386,16 @@ public class BizSubmissionChapterServiceImpl implements IBizSubmissionChapterSer
                 }
             }
 
-            // 6. 全部完成
+            // 6. 全部完成——更新标书配置状态为"已生成内容"，重算投标项目整体进度
+            try {
+                BizDocumentConfig configUpdate = new BizDocumentConfig();
+                configUpdate.setId(documentConfigId);
+                configUpdate.setGenerationStatus("content_generated");
+                documentConfigMapper.updateById(configUpdate);
+                recalculateSubmissionProgress(submissionId);
+            } catch (Exception ex) {
+                log.warn("更新标书配置状态(content_generated)失败: {}", ex.getMessage());
+            }
             SseMessageUtils.sendMessage(userId, buildBatchSseMessage("batch_success", "全部章节生成完成", total, total, 100, null));
             log.info("批量章节内容生成完成，submissionId: {}, total: {}", submissionId, total);
 
@@ -900,12 +909,12 @@ public void doGenerateChapterStructure(Long submissionId, Long documentConfigId,
                 @Override
                 public void afterCommit() {
                     log.info("事务已提交，发送成功消息");
-                    markChapterStructureGeneratedSuccess(submissionId, userId);
+                    markChapterStructureGeneratedSuccess(submissionId, documentConfigId, userId);
                 }
             });
         } else {
             log.warn("未检测到事务同步上下文，立即发送章节结构生成成功消息");
-            markChapterStructureGeneratedSuccess(submissionId, userId);
+            markChapterStructureGeneratedSuccess(submissionId, documentConfigId, userId);
         }
 
     } catch (Exception e) {
@@ -937,21 +946,63 @@ private void updateSubmissionProgress(Long submissionId, int progress, int chapt
 
 /**
  * 章节结构生成成功后的统一收尾
- * - 更新状态：chapter_structure_generated=1，progress=100，workflow_stage=structure_generated
+ * - 更新状态：chapter_structure_generated=1，workflow_stage=structure_generated
+ * - 更新标书配置状态为 structure_generated（已生成目录）
+ * - 重新计算投标项目整体进度
  * - 发送 SSE success，供前端自动刷新目录
  */
-private void markChapterStructureGeneratedSuccess(Long submissionId, Long userId) {
+private void markChapterStructureGeneratedSuccess(Long submissionId, Long documentConfigId, Long userId) {
     try {
         BizBidSubmission update = new BizBidSubmission();
         update.setId(submissionId);
-        update.setGenerationProgress(100);
         update.setChapterStructureGenerated("1");
         update.setWorkflowStage("structure_generated");
         submissionMapper.updateById(update);
+
+        // 更新标书配置状态为"已生成目录"
+        BizDocumentConfig configUpdate = new BizDocumentConfig();
+        configUpdate.setId(documentConfigId);
+        configUpdate.setGenerationStatus("structure_generated");
+        documentConfigMapper.updateById(configUpdate);
+
+        // 重新计算投标项目整体进度
+        recalculateSubmissionProgress(submissionId);
     } catch (Exception e) {
         log.warn("更新章节结构生成成功状态失败: {}", e.getMessage());
     }
     SseMessageUtils.sendMessage(userId, buildSseMessage("success", "章节结构生成完成", 100, null));
+}
+
+/**
+ * 根据各标书配置状态重新计算投标项目整体进度
+ * pending=0, structure_generated=33, content_generated=66, exported=100
+ */
+private void recalculateSubmissionProgress(Long submissionId) {
+    try {
+        List<BizDocumentConfig> configs = documentConfigMapper.selectList(
+            Wrappers.lambdaQuery(BizDocumentConfig.class)
+                .eq(BizDocumentConfig::getBidSubmissionId, submissionId)
+                .eq(BizDocumentConfig::getStatus, "active")
+        );
+        if (configs.isEmpty()) return;
+        int totalScore = 0;
+        for (BizDocumentConfig config : configs) {
+            String s = config.getGenerationStatus();
+            totalScore += switch (s != null ? s : "") {
+                case "structure_generated" -> 33;
+                case "content_generated"  -> 66;
+                case "exported"           -> 100;
+                default                   -> 0;
+            };
+        }
+        int avgProgress = totalScore / configs.size();
+        BizBidSubmission progressUpdate = new BizBidSubmission();
+        progressUpdate.setId(submissionId);
+        progressUpdate.setGenerationProgress(avgProgress);
+        submissionMapper.updateById(progressUpdate);
+    } catch (Exception e) {
+        log.warn("重新计算投标项目进度失败: {}", e.getMessage());
+    }
 }
 
 /**
@@ -1049,6 +1100,21 @@ public void clearChapters(Long submissionId, Long documentId) {
         lqw.eq(BizSubmissionChapter::getSubmissionDocumentId, documentId);
     }
     baseMapper.delete(lqw);
+
+    // 清空章节后，重置对应标书配置状态为 pending，并重算整体进度
+    if (documentId != null) {
+        try {
+            BizDocumentConfig configUpdate = new BizDocumentConfig();
+            configUpdate.setId(documentId);
+            configUpdate.setGenerationStatus("pending");
+            documentConfigMapper.updateById(configUpdate);
+            if (submissionId != null) {
+                recalculateSubmissionProgress(submissionId);
+            }
+        } catch (Exception e) {
+            log.warn("重置标书配置状态(pending)失败: {}", e.getMessage());
+        }
+    }
 }
 
 /**

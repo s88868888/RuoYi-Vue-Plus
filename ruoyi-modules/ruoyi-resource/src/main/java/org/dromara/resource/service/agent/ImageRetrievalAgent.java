@@ -275,16 +275,14 @@ public class ImageRetrievalAgent {
     }
 
     /**
-     * 构建图片HTML
+     * 构建图片HTML（使用div+data-align确保在AiEditor中居中显示）
      */
     private String buildImageHtml(String urlOrOssId, String caption) {
         String url = resolveOssUrl(urlOrOssId);
-        return String.format("""
-            <div class="chapter-image" style="text-align:center;margin:16px 0;">
-              <img src="%s" alt="%s" style="max-width:80%%;border:1px solid #eee;border-radius:4px;display:block;margin:0 auto;" />
-              <p style="color:#666;font-size:12px;margin-top:4px;text-align:center;">图：%s</p>
-            </div>
-            """, url, caption, caption);
+        return String.format(
+            "<div style=\"text-align:center\"><img src=\"%s\" alt=\"%s\" data-align=\"center\" style=\"max-width:80%%;border:1px solid #eee;border-radius:4px;\" /></div>" +
+            "<p style=\"text-align:center;color:#666;font-size:12px;margin-top:4px;\">图：%s</p>\n",
+            url, caption, caption);
     }
 
     /**
@@ -318,9 +316,8 @@ public class ImageRetrievalAgent {
     private String buildMissingHtml(String type, String name) {
         log.warn("图片缺失: type={}, name={}", type, name);
         return String.format(
-            "<div class=\"missing-image\" data-type=\"%s\" data-name=\"%s\" " +
-            "style=\"text-align:center;margin:16px 0;padding:20px;border:2px dashed #ffa940;border-radius:4px;background:#fff7e6;\">" +
+            "<div style=\"text-align:center;margin:16px 0;padding:20px;border:2px dashed #ffa940;border-radius:4px;background:#fff7e6;\">" +
             "<span style=\"color:#fa8c16;font-size:14px;\">&#9888; 缺失图片: %s</span></div>\n",
-            type, name, name);
+            name);
     }
 }

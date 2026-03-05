@@ -127,8 +127,8 @@ public class BizSubmissionChapterController extends BaseController {
     @PutMapping
     public R<Void> saveChapter(
         @RequestParam Long id,
-        @RequestParam String content) {
-        chapterService.saveChapterContent(id, content);
+        @RequestBody Map<String, String> body) {
+        chapterService.saveChapterContent(id, body.get("content"));
         return R.ok();
     }
 
