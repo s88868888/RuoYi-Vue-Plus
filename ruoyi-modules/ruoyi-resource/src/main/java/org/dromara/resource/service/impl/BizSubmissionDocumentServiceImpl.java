@@ -48,6 +48,64 @@ public class BizSubmissionDocumentServiceImpl implements IBizSubmissionDocumentS
     }
 
     @Override
+    public List<BizSubmissionDocumentVo> listAllBySubmissionId(Long submissionId) {
+        return baseMapper.selectAllBySubmissionId(submissionId);
+    }
+
+    @Override
+    @Transactional(rollbackFor = Exception.class)
+    public BizSubmissionDocumentVo saveAllVersion(Long submissionId) {
+        // 1. 查询该投标项目下所有章节，按 sort_order 排序
+        LambdaQueryWrapper<BizSubmissionChapter> chapterQuery = Wrappers.lambdaQuery();
+        chapterQuery.eq(BizSubmissionChapter::getBidSubmissionId, submissionId);
+        chapterQuery.orderByAsc(BizSubmissionChapter::getSortOrder);
+        List<BizSubmissionChapter> allChapters = chapterMapper.selectList(chapterQuery);
+
+        if (allChapters == null || allChapters.isEmpty()) {
+            throw new ServiceException("暂无章节内容可归纳");
+        }
+
+        // 2. 合并为 Markdown（父章节=标题，按层级生成 # 标题）
+        String markdownContent = buildMarkdownContent(allChapters);
+
+        // 3. 查询当前最大版本号（整本合并文档，documentConfigId 为空）
+        LambdaQueryWrapper<BizSubmissionDocument> versionQuery = Wrappers.lambdaQuery();
+        versionQuery.eq(BizSubmissionDocument::getBidSubmissionId, submissionId);
+        versionQuery.eq(BizSubmissionDocument::getDocumentType, "complete");
+        versionQuery.isNull(BizSubmissionDocument::getDocumentConfigId);
+        List<BizSubmissionDocument> existingDocs = baseMapper.selectList(versionQuery);
+        int maxVersion = existingDocs.stream()
+            .mapToInt(v -> v.getVersion() != null ? v.getVersion() : 0)
+            .max()
+            .orElse(0);
+
+        // 4. 将旧版本的 is_latest 更新为 '0'
+        if (!existingDocs.isEmpty()) {
+            LambdaUpdateWrapper<BizSubmissionDocument> updateWrapper = Wrappers.lambdaUpdate();
+            updateWrapper.eq(BizSubmissionDocument::getBidSubmissionId, submissionId);
+            updateWrapper.eq(BizSubmissionDocument::getDocumentType, "complete");
+            updateWrapper.isNull(BizSubmissionDocument::getDocumentConfigId);
+            updateWrapper.set(BizSubmissionDocument::getIsLatest, "0");
+            baseMapper.update(null, updateWrapper);
+        }
+
+        // 5. 插入新版本记录
+        BizSubmissionDocument newDoc = new BizSubmissionDocument();
+        newDoc.setBidSubmissionId(submissionId);
+        newDoc.setDocumentName("完整标书");
+        newDoc.setDocumentType("complete");
+        newDoc.setDocumentContent(markdownContent);
+        newDoc.setVersion(maxVersion + 1);
+        newDoc.setIsLatest("1");
+        newDoc.setGenerationStatus("completed");
+        newDoc.setGenerationProgress(100);
+
+        baseMapper.insert(newDoc);
+
+        return baseMapper.selectVoById(newDoc.getId());
+    }
+
+    @Override
     @Transactional(rollbackFor = Exception.class)
     public BizSubmissionDocumentVo saveVersion(Long documentConfigId, Long submissionId) {
         // 1. 查询文档配置信息
@@ -156,47 +214,42 @@ public class BizSubmissionDocumentServiceImpl implements IBizSubmissionDocumentS
     private void exportAsDocx(String content, String docName, HttpServletResponse response) throws IOException {
         XWPFDocument document = new XWPFDocument();
 
-        // 将 Markdown 逐行写入 Word（简单处理：按行分段，#开头当标题）
+        // 将 Markdown 逐行写入 Word（#开头当标题，设置 outline level 确保 Word 导航视图可见）
         String[] lines = content.split("\n");
         for (String line : lines) {
             if (StrUtil.isBlank(line)) {
                 continue;
             }
-            if (line.startsWith("# ")) {
-                XWPFParagraph p = document.createParagraph();
-                p.setStyle("Heading1");
-                XWPFRun run = p.createRun();
-                run.setText(line.substring(2).trim());
-                run.setBold(true);
-                run.setFontSize(18);
-            } else if (line.startsWith("## ")) {
-                XWPFParagraph p = document.createParagraph();
-                p.setStyle("Heading2");
-                XWPFRun run = p.createRun();
-                run.setText(line.substring(3).trim());
-                run.setBold(true);
-                run.setFontSize(16);
-            } else if (line.startsWith("### ")) {
-                XWPFParagraph p = document.createParagraph();
-                p.setStyle("Heading3");
-                XWPFRun run = p.createRun();
-                run.setText(line.substring(4).trim());
-                run.setBold(true);
-                run.setFontSize(14);
-            } else if (line.startsWith("#### ") || line.startsWith("##### ") || line.startsWith("###### ")) {
-                int level = line.indexOf(' ');
-                XWPFParagraph p = document.createParagraph();
-                XWPFRun run = p.createRun();
-                run.setText(line.substring(level + 1).trim());
-                run.setBold(true);
-                run.setFontSize(13);
-            } else {
-                // 普通段落 - 处理 HTML 内容（去除标签后输出）
-                XWPFParagraph p = document.createParagraph();
-                XWPFRun run = p.createRun();
-                run.setText(stripHtmlTags(line));
-                run.setFontSize(11);
+            // 判断标题级别
+            if (line.startsWith("#")) {
+                int level = 0;
+                while (level < line.length() && line.charAt(level) == '#') {
+                    level++;
+                }
+                if (level >= 1 && level <= 6 && level < line.length() && line.charAt(level) == ' ') {
+                    String text = line.substring(level + 1).trim();
+                    XWPFParagraph p = document.createParagraph();
+                    // 设置 outline level，确保在 Word 导航窗格中显示
+                    p.getCTP().addNewPPr().addNewOutlineLvl().setVal(level - 1);
+                    XWPFRun run = p.createRun();
+                    run.setText(text);
+                    run.setBold(true);
+                    // 字号随层级递减：一级18，二级16，三级14，四级及以下13
+                    int fontSize = switch (level) {
+                        case 1 -> 18;
+                        case 2 -> 16;
+                        case 3 -> 14;
+                        default -> 13;
+                    };
+                    run.setFontSize(fontSize);
+                    continue;
+                }
             }
+            // 普通段落 - 处理 HTML 内容（去除标签后输出）
+            XWPFParagraph p = document.createParagraph();
+            XWPFRun run = p.createRun();
+            run.setText(stripHtmlTags(line));
+            run.setFontSize(11);
         }
 
         response.setContentType("application/vnd.openxmlformats-officedocument.wordprocessingml.document");

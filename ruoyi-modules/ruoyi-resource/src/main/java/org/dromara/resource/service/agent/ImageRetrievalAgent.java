@@ -268,8 +268,8 @@ public class ImageRetrievalAgent {
     private String buildImageHtml(String url, String caption) {
         return String.format("""
             <div class="chapter-image" style="text-align:center;margin:16px 0;">
-              <img src="%s" alt="%s" style="max-width:80%%;border:1px solid #eee;border-radius:4px;" />
-              <p style="color:#666;font-size:12px;margin-top:4px;">图：%s</p>
+              <img src="%s" alt="%s" style="max-width:80%%;border:1px solid #eee;border-radius:4px;display:block;margin:0 auto;" />
+              <p style="color:#666;font-size:12px;margin-top:4px;text-align:center;">图：%s</p>
             </div>
             """, url, caption, caption);
     }

@@ -15,6 +15,7 @@ import org.springframework.stereotype.Service;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
+import java.util.function.Supplier;
 
 /**
  * 通用 AI 调用服务
@@ -31,6 +32,30 @@ public class AiChatService {
     private final EmbeddingModel embeddingModel;
     private final ChatClient chatClient;
     private final DashScopeDocumentAnalysisAdvisor documentAdvisor;
+
+    /**
+     * 最大重试次数
+     */
+    @Value("${ai.retry.max-attempts:5}")
+    private int maxRetryAttempts;
+
+    /**
+     * 初始退避时间（毫秒）
+     */
+    @Value("${ai.retry.initial-backoff-ms:2000}")
+    private long initialBackoffMs;
+
+    /**
+     * 退避倍数
+     */
+    @Value("${ai.retry.backoff-multiplier:2.0}")
+    private double backoffMultiplier;
+
+    /**
+     * 最大退避时间（毫秒）
+     */
+    @Value("${ai.retry.max-backoff-ms:60000}")
+    private long maxBackoffMs;
 
     public AiChatService(EmbeddingModel embeddingModel,
                          ChatClient.Builder chatClientBuilder,
@@ -67,11 +92,11 @@ public class AiChatService {
      * @return AI 回复
      */
     public String chat(String message) {
-        return chatClient.prompt()
+        return callWithRetry(() -> chatClient.prompt()
             .user(message)
             .options(CHAT_OPTIONS)
             .call()
-            .content();
+            .content());
     }
 
     /**
@@ -92,12 +117,13 @@ public class AiChatService {
         }
         log.info("[chat] systemPrompt={}", systemPrompt);
         log.info("[chat] cleanMessage length={}", cleanMessage.length());
-        return chatClient.prompt()
+        final String finalCleanMessage = cleanMessage;
+        return callWithRetry(() -> chatClient.prompt()
             .system(systemPrompt)
-            .user(cleanMessage)
+            .user(finalCleanMessage)
             .options(CHAT_OPTIONS)
             .call()
-            .content();
+            .content());
     }
 
     /**
@@ -113,12 +139,13 @@ public class AiChatService {
         for (Map.Entry<String, Object> entry : variables.entrySet()) {
             resolvedSystemPrompt = resolvedSystemPrompt.replace("{" + entry.getKey() + "}", String.valueOf(entry.getValue()));
         }
-        return chatClient.prompt()
-            .system(resolvedSystemPrompt)
+        final String finalSystemPrompt = resolvedSystemPrompt;
+        return callWithRetry(() -> chatClient.prompt()
+            .system(finalSystemPrompt)
             .user(userMessage)
             .options(CHAT_OPTIONS)
             .call()
-            .content();
+            .content());
     }
 
     /**
@@ -128,10 +155,10 @@ public class AiChatService {
      * @return AI 回复
      */
     public String chat(Prompt prompt) {
-        return chatClient.prompt(prompt)
+        return callWithRetry(() -> chatClient.prompt(prompt)
             .options(CHAT_OPTIONS)
             .call()
-            .content();
+            .content());
     }
 
     /**
@@ -141,11 +168,11 @@ public class AiChatService {
      * @return AI 回复
      */
     public String chatGenerate(String prompt) {
-        return chatClient.prompt()
+        return callWithRetry(() -> chatClient.prompt()
             .user(prompt)
             .options(GENERATE_OPTIONS)
             .call()
-            .content();
+            .content());
     }
 
     /**
@@ -180,13 +207,13 @@ public class AiChatService {
      * @return AI 回复
      */
     public String chatWithDocument(Resource resource, String userMessage) {
-        return chatClient.prompt()
+        return callWithRetry(() -> chatClient.prompt()
             .advisors(documentAdvisor)
             .advisors(a -> a.param(DashScopeDocumentAnalysisAdvisor.RESOURCE, resource))
             .user(userMessage)
             .options(DOC_OPTIONS)
             .call()
-            .content();
+            .content());
     }
 
     /**
@@ -198,6 +225,67 @@ public class AiChatService {
      */
     public String chatWithDocumentUrl(String url, String userMessage) {
         return chatWithDocument(UrlResource.from(url), userMessage);
+    }
+
+    /**
+     * 带指数退避的重试包装器
+     * <p>
+     * 针对 HTTP 429（限流/配额超限）等异常自动重试，使用指数退避策略避免打满API限额。
+     * 其他非限流异常直接抛出，不进行重试。
+     *
+     * @param action 实际的 AI 调用逻辑
+     * @return AI 回复
+     */
+    private String callWithRetry(Supplier<String> action) {
+        long backoffMs = initialBackoffMs;
+
+        for (int attempt = 1; attempt <= maxRetryAttempts; attempt++) {
+            try {
+                return action.get();
+            } catch (Exception e) {
+                // 判断是否为限流/配额错误（429 或 Throttling）
+                if (!isRateLimitError(e)) {
+                    throw e;
+                }
+
+                if (attempt >= maxRetryAttempts) {
+                    log.error("AI调用在{}次重试后仍然失败，放弃重试", maxRetryAttempts, e);
+                    throw e;
+                }
+
+                log.warn("AI调用遇到限流(429)，第{}次重试，等待{}ms后重试。错误: {}",
+                    attempt, backoffMs, e.getMessage());
+
+                try {
+                    Thread.sleep(backoffMs);
+                } catch (InterruptedException ie) {
+                    Thread.currentThread().interrupt();
+                    throw new RuntimeException("重试等待被中断", ie);
+                }
+
+                // 指数退避，不超过最大退避时间
+                backoffMs = Math.min((long) (backoffMs * backoffMultiplier), maxBackoffMs);
+            }
+        }
+
+        // 不应该到达这里
+        throw new RuntimeException("AI调用重试逻辑异常");
+    }
+
+    /**
+     * 判断异常是否为限流/配额错误
+     */
+    private boolean isRateLimitError(Exception e) {
+        String message = e.getMessage();
+        if (message == null) {
+            return false;
+        }
+        return message.contains("429")
+            || message.contains("Throttling")
+            || message.contains("quota")
+            || message.contains("rate limit")
+            || message.contains("Rate limit")
+            || message.contains("AllocationQuota");
     }
 
 }

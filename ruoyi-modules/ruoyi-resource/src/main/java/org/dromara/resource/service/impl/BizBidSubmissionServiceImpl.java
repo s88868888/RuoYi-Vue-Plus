@@ -52,7 +52,15 @@ public class BizBidSubmissionServiceImpl implements IBizBidSubmissionService {
 
     @Override
     public BizBidSubmissionVo queryById(Long id) {
-        return baseMapper.selectVoById(id);
+        BizBidSubmissionVo vo = baseMapper.selectVoById(id);
+        if (vo != null && vo.getBidProjectId() != null) {
+            BizBidProject project = bidProjectMapper.selectById(vo.getBidProjectId());
+            if (project != null) {
+                vo.setPublishDate(project.getPublishDate());
+                vo.setDeadline(project.getDeadline());
+            }
+        }
+        return vo;
     }
 
     @Override

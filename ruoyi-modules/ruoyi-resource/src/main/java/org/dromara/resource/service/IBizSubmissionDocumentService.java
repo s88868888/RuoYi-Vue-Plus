@@ -21,9 +21,19 @@ public interface IBizSubmissionDocumentService {
     List<BizSubmissionDocumentVo> listVersionsByConfigId(Long documentConfigId);
 
     /**
+     * 查询指定投标项目所有版本文档列表
+     */
+    List<BizSubmissionDocumentVo> listAllBySubmissionId(Long submissionId);
+
+    /**
      * 保存当前章节内容为新版本
      */
     BizSubmissionDocumentVo saveVersion(Long documentConfigId, Long submissionId);
+
+    /**
+     * 将所有章节合并为一份完整文档并保存为新版本
+     */
+    BizSubmissionDocumentVo saveAllVersion(Long submissionId);
 
     /**
      * 导出文档（docx/pdf）

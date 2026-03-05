@@ -25,4 +25,9 @@ public interface BizSubmissionDocumentMapper extends BaseMapperPlus<BizSubmissio
      */
     List<BizSubmissionDocumentVo> selectVersionsByConfigId(@Param("documentConfigId") Long documentConfigId);
 
+    /**
+     * 查询指定投标项目所有版本文档列表（按文档序号、版本倒序）
+     */
+    List<BizSubmissionDocumentVo> selectAllBySubmissionId(@Param("submissionId") Long submissionId);
+
 }

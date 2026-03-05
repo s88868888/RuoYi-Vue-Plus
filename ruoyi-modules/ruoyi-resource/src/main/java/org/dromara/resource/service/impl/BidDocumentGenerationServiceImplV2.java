@@ -67,6 +67,16 @@ public class BidDocumentGenerationServiceImplV2 implements IBidDocumentGeneratio
             return;
         }
 
+        // Step 1: 更新顶层状态为 generating
+        submission.setSubmissionStatus("generating");
+        submission.setGenerationProgress(0);
+        submission.setStartTime(new Date());
+        submission.setTotalDocuments(0);
+        submission.setCompletedDocuments(0);
+        submission.setFailedDocuments(0);
+        submission.setErrorMessage(null);
+        submissionMapper.updateById(submission);
+
         try {
             // ========== 步骤1: 解析招标文件 ==========
             logProgress(submissionId, null, "解析招标文件", 5, "开始解析招标文件");
@@ -119,6 +129,9 @@ public class BidDocumentGenerationServiceImplV2 implements IBidDocumentGeneratio
                 completedDocuments++;
             }
 
+            // Step 2: 章节结构生成完毕，更新文档总数和进度
+            submission.setTotalDocuments(totalDocuments);
+            submission.setGenerationProgress(20);
             submission.setChapterStructureGenerated("1");
             submissionMapper.updateById(submission);
 
@@ -126,87 +139,111 @@ public class BidDocumentGenerationServiceImplV2 implements IBidDocumentGeneratio
             completedDocuments = 0;
 
             for (BizSubmissionDocument document : documents) {
-                logProgress(submissionId, document.getId(), "生成文档内容",
-                    25 + (completedDocuments * 60 / totalDocuments),
-                    String.format("开始生成文档[%s]", document.getDocumentName()));
+                try {
+                    logProgress(submissionId, document.getId(), "生成文档内容",
+                        25 + (completedDocuments * 60 / totalDocuments),
+                        String.format("开始生成文档[%s]", document.getDocumentName()));
 
-                // 获取该文档的所有章节
-                List<BizSubmissionChapter> chapters = chapterMapper.selectList(
-                    new com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper<BizSubmissionChapter>()
-                        .eq(BizSubmissionChapter::getSubmissionDocumentId, document.getId())
-                        .orderByAsc(BizSubmissionChapter::getSortOrder)
-                );
+                    // Step 3: 标记文档为 generating
+                    document.setGenerationStatus("generating");
+                    document.setGenerationProgress(0);
+                    document.setGenerationStartTime(new Date());
+                    documentMapper.updateById(document);
 
-                // 获取公司信息
-                Map<String, String> companyInfo = getCompanyInfo(document.getCompanyId(), parseResult);
+                    // 获取该文档的所有章节
+                    List<BizSubmissionChapter> chapters = chapterMapper.selectList(
+                        new com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper<BizSubmissionChapter>()
+                            .eq(BizSubmissionChapter::getSubmissionDocumentId, document.getId())
+                            .orderByAsc(BizSubmissionChapter::getSortOrder)
+                    );
 
-                // 构建生成上下文
-                ChapterGenerationAgent.GenerationContext context = buildGenerationContext(
-                    submission, companyInfo, parseResult
-                );
+                    // 获取公司信息
+                    Map<String, String> companyInfo = getCompanyInfo(document.getCompanyId(), parseResult);
 
-                // 处理每个章节
-                int totalChapters = chapters.size();
-                int processedChapters = 0;
+                    // 构建生成上下文
+                    ChapterGenerationAgent.GenerationContext context = buildGenerationContext(
+                        submission, companyInfo, parseResult
+                    );
 
-                for (BizSubmissionChapter chapter : chapters) {
-                    try {
-                        logProgress(submissionId, document.getId(),
-                            "生成章节: " + chapter.getChapterTitle(),
-                            25 + (completedDocuments * 60 / totalDocuments) +
-                                (processedChapters * 60 / totalDocuments / totalChapters),
-                            String.format("正在生成章节[%s - %s]",
-                                chapter.getChapterNo(), chapter.getChapterTitle()));
+                    // 处理每个章节
+                    int totalChapters = chapters.size();
+                    int processedChapters = 0;
 
-                        chapter.setGenerationStatus("generating");
-                        chapterMapper.updateById(chapter);
+                    for (BizSubmissionChapter chapter : chapters) {
+                        try {
+                            logProgress(submissionId, document.getId(),
+                                "生成章节: " + chapter.getChapterTitle(),
+                                25 + (completedDocuments * 60 / totalDocuments) +
+                                    (processedChapters * 60 / totalDocuments / totalChapters),
+                                String.format("正在生成章节[%s - %s]",
+                                    chapter.getChapterNo(), chapter.getChapterTitle()));
 
-                        String content;
-                        if ("template".equals(chapter.getChapterType())) {
-                            // 模板章节：填充公司信息
-                            content = processTemplateChapter(chapter, companyInfo, parseResult);
-                        } else {
-                            // AI生成章节
-                            content = chapterGenerationAgent.generateChapter(chapter, context);
+                            chapter.setGenerationStatus("generating");
+                            chapterMapper.updateById(chapter);
+
+                            String content;
+                            if ("template".equals(chapter.getChapterType())) {
+                                // 模板章节：填充公司信息
+                                content = processTemplateChapter(chapter, companyInfo, parseResult);
+                            } else {
+                                // AI生成章节
+                                content = chapterGenerationAgent.generateChapter(chapter, context);
+                            }
+
+                            // 解析并替换图片占位符为真实图片
+                            content = imageRetrievalAgent.resolveImagePlaceholders(content, document.getCompanyId());
+
+                            // 保存章节内容
+                            chapter.setChapterContent(content);
+                            chapter.setGenerationStatus("completed");
+                            chapter.setGenerationProgress(100);
+                            chapter.setGenerationEndTime(new Date());
+                            chapterMapper.updateById(chapter);
+
+                            processedChapters++;
+
+                        } catch (Exception e) {
+                            log.error("章节生成失败: {}", chapter.getChapterTitle(), e);
+                            chapter.setGenerationStatus("failed");
+                            chapter.setErrorMessage(e.getMessage());
+                            chapterMapper.updateById(chapter);
                         }
-
-                        // 解析并替换图片占位符为真实图片
-                        content = imageRetrievalAgent.resolveImagePlaceholders(content, document.getCompanyId());
-
-                        // 保存章节内容
-                        chapter.setChapterContent(content);
-                        chapter.setGenerationStatus("completed");
-                        chapter.setGenerationProgress(100);
-                        chapter.setGenerationEndTime(new Date());
-                        chapterMapper.updateById(chapter);
-
-                        processedChapters++;
-
-                    } catch (Exception e) {
-                        log.error("章节生成失败: {}", chapter.getChapterTitle(), e);
-                        chapter.setGenerationStatus("failed");
-                        chapter.setErrorMessage(e.getMessage());
-                        chapterMapper.updateById(chapter);
                     }
+
+                    // ========== 步骤5: 合成文档 ==========
+                    logProgress(submissionId, document.getId(), "合成文档",
+                        85 + (completedDocuments * 10 / totalDocuments),
+                        String.format("合成文档[%s]", document.getDocumentName()));
+
+                    String finalDocument = documentAssemblyAgent.assembleDocument(
+                        chapters, submission.getProjectName()
+                    );
+
+                    // 保存最终文档
+                    document.setDocumentContent(finalDocument);
+                    document.setGenerationStatus("completed");
+                    document.setGenerationProgress(100);
+                    document.setGenerationEndTime(new Date());
+                    documentMapper.updateById(document);
+
+                    // Step 4: 递增 completedDocuments，更新顶层进度
+                    completedDocuments++;
+                    int overallProgress = 20 + (completedDocuments * 80 / totalDocuments);
+                    submission.setCompletedDocuments(completedDocuments);
+                    submission.setGenerationProgress(overallProgress);
+                    submissionMapper.updateById(submission);
+
+                } catch (Exception docEx) {
+                    // Step 5: 文档级失败处理
+                    log.error("文档生成失败: {}", document.getDocumentName(), docEx);
+                    document.setGenerationStatus("failed");
+                    document.setErrorMessage(docEx.getMessage());
+                    documentMapper.updateById(document);
+
+                    submission.setFailedDocuments(submission.getFailedDocuments() + 1);
+                    submissionMapper.updateById(submission);
+                    completedDocuments++;
                 }
-
-                // ========== 步骤5: 合成文档 ==========
-                logProgress(submissionId, document.getId(), "合成文档",
-                    85 + (completedDocuments * 10 / totalDocuments),
-                    String.format("合成文档[%s]", document.getDocumentName()));
-
-                String finalDocument = documentAssemblyAgent.assembleDocument(
-                    chapters, submission.getProjectName()
-                );
-
-                // 保存最终文档
-                document.setDocumentContent(finalDocument);
-                document.setGenerationStatus("completed");
-                document.setGenerationProgress(100);
-                document.setGenerationEndTime(new Date());
-                documentMapper.updateById(document);
-
-                completedDocuments++;
             }
 
             // ========== 完成 ==========
@@ -356,8 +393,53 @@ public class BidDocumentGenerationServiceImplV2 implements IBidDocumentGeneratio
 
     @Override
     public BidSubmissionProgressVo getGenerationProgress(Long submissionId) {
-        // TODO: 实现进度查询（复用之前的代码）
-        return null;
+        BizBidSubmission submission = submissionMapper.selectById(submissionId);
+        if (submission == null) return null;
+
+        BidSubmissionProgressVo vo = new BidSubmissionProgressVo();
+        vo.setSubmissionId(submissionId);
+        vo.setSubmissionStatus(submission.getSubmissionStatus());
+        vo.setOverallProgress(submission.getGenerationProgress());
+        vo.setTotalDocuments(submission.getTotalDocuments());
+        vo.setCompletedDocuments(submission.getCompletedDocuments());
+        vo.setFailedDocuments(submission.getFailedDocuments());
+
+        // 查询各文档状态
+        List<BizSubmissionDocument> docs = documentMapper.selectList(
+            new LambdaQueryWrapper<BizSubmissionDocument>()
+                .eq(BizSubmissionDocument::getBidSubmissionId, submissionId)
+        );
+        List<BidSubmissionProgressVo.DocumentProgressItem> docItems = docs.stream().map(doc -> {
+            BidSubmissionProgressVo.DocumentProgressItem item = new BidSubmissionProgressVo.DocumentProgressItem();
+            item.setDocumentId(doc.getId());
+            item.setCompanyName(doc.getCompanyName());
+            item.setDocumentType(doc.getDocumentType());
+            item.setGenerationStatus(doc.getGenerationStatus());
+            item.setProgress(doc.getGenerationProgress());
+            item.setErrorMessage(doc.getErrorMessage());
+            return item;
+        }).collect(Collectors.toList());
+        vo.setDocuments(docItems);
+
+        // 查询最近20条日志
+        List<BizSubmissionDocumentLog> logs = logMapper.selectList(
+            new LambdaQueryWrapper<BizSubmissionDocumentLog>()
+                .eq(BizSubmissionDocumentLog::getBidSubmissionId, submissionId)
+                .orderByDesc(BizSubmissionDocumentLog::getLogTime)
+                .last("LIMIT 20")
+        );
+        List<BidSubmissionProgressVo.LogItem> logItems = logs.stream().map(l -> {
+            BidSubmissionProgressVo.LogItem li = new BidSubmissionProgressVo.LogItem();
+            li.setStage(l.getStage());
+            li.setMessage(l.getLogMessage());
+            li.setProgress(l.getProgress());
+            li.setLevel(l.getLogLevel());
+            li.setTime(l.getLogTime() != null ? l.getLogTime().toString() : null);
+            return li;
+        }).collect(Collectors.toList());
+        vo.setLogs(logItems);
+
+        return vo;
     }
 
     @Override

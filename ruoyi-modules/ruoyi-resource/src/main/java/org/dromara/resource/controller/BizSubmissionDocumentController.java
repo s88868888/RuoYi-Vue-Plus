@@ -38,6 +38,16 @@ public class BizSubmissionDocumentController extends BaseController {
     }
 
     /**
+     * 查询投标项目所有版本文档列表
+     */
+    @SaCheckPermission("bid:submission:query")
+    @GetMapping("/all/{submissionId}")
+    public R<List<BizSubmissionDocumentVo>> allBySubmissionId(
+        @NotNull(message = "投标项目ID不能为空") @PathVariable Long submissionId) {
+        return R.ok(submissionDocumentService.listAllBySubmissionId(submissionId));
+    }
+
+    /**
      * 查询某文档配置下历史版本
      */
     @SaCheckPermission("bid:submission:query")
@@ -45,6 +55,17 @@ public class BizSubmissionDocumentController extends BaseController {
     public R<List<BizSubmissionDocumentVo>> versionsByConfigId(
         @NotNull(message = "文档配置ID不能为空") @PathVariable Long documentConfigId) {
         return R.ok(submissionDocumentService.listVersionsByConfigId(documentConfigId));
+    }
+
+    /**
+     * 将所有章节合并为一份完整文档并保存为新版本
+     */
+    @SaCheckPermission("bid:submission:edit")
+    @Log(title = "归纳完整标书版本", businessType = BusinessType.INSERT)
+    @PostMapping("/saveAllVersion/{submissionId}")
+    public R<BizSubmissionDocumentVo> saveAllVersion(
+        @NotNull(message = "投标项目ID不能为空") @PathVariable Long submissionId) {
+        return R.ok(submissionDocumentService.saveAllVersion(submissionId));
     }
 
     /**

@@ -39,6 +39,11 @@ public class BizSubmissionDocumentVo implements Serializable {
     private Long bidSubmissionId;
 
     /**
+     * 关联配置表ID
+     */
+    private Long documentConfigId;
+
+    /**
      * 公司ID
      */
     @ExcelProperty(value = "公司ID")

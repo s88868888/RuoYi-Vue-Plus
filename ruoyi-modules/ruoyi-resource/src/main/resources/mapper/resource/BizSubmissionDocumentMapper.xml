@@ -19,4 +19,12 @@
         ORDER BY version DESC
     </select>
 
+    <select id="selectAllBySubmissionId" resultType="org.dromara.resource.domain.vo.BizSubmissionDocumentVo">
+        SELECT *
+        FROM biz_submission_document
+        WHERE bid_submission_id = #{submissionId}
+          AND del_flag = '0'
+        ORDER BY document_no, version DESC
+    </select>
+
 </mapper>

@@ -162,6 +162,16 @@ public class BizBidSubmissionVo implements Serializable {
     private String remark;
 
     /**
+     * 招标项目发布日期（开始时间，来自关联的 biz_bid_project）
+     */
+    private Date publishDate;
+
+    /**
+     * 招标项目截止日期（来自关联的 biz_bid_project）
+     */
+    private Date deadline;
+
+    /**
      * 创建时间
      */
     @ExcelProperty(value = "创建时间")
