@@ -68,7 +68,7 @@ public class BidDocumentGenerationServiceImplV2 implements IBidDocumentGeneratio
         }
 
         // Step 1: 更新顶层状态为 generating
-        submission.setSubmissionStatus("generating");
+        submission.setStatus("generating");
         submission.setGenerationProgress(0);
         submission.setStartTime(new Date());
         submission.setTotalDocuments(0);
@@ -132,7 +132,6 @@ public class BidDocumentGenerationServiceImplV2 implements IBidDocumentGeneratio
             // Step 2: 章节结构生成完毕，更新文档总数和进度
             submission.setTotalDocuments(totalDocuments);
             submission.setGenerationProgress(20);
-            submission.setChapterStructureGenerated("1");
             submissionMapper.updateById(submission);
 
             // ========== 步骤3-4: 逐个处理章节 ==========
@@ -247,7 +246,7 @@ public class BidDocumentGenerationServiceImplV2 implements IBidDocumentGeneratio
             }
 
             // ========== 完成 ==========
-            submission.setSubmissionStatus("completed");
+            submission.setStatus("generated");
             submission.setGenerationProgress(100);
             submission.setCompletedDocuments(totalDocuments);
             submission.setEndTime(new Date());
@@ -260,7 +259,7 @@ public class BidDocumentGenerationServiceImplV2 implements IBidDocumentGeneratio
 
         } catch (Exception e) {
             log.error("投标项目生成失败", e);
-            submission.setSubmissionStatus("failed");
+            submission.setStatus("failed");
             submission.setErrorMessage(e.getMessage());
             submission.setEndTime(new Date());
             submissionMapper.updateById(submission);
@@ -398,7 +397,7 @@ public class BidDocumentGenerationServiceImplV2 implements IBidDocumentGeneratio
 
         BidSubmissionProgressVo vo = new BidSubmissionProgressVo();
         vo.setSubmissionId(submissionId);
-        vo.setSubmissionStatus(submission.getSubmissionStatus());
+        vo.setStatus(submission.getStatus());
         vo.setOverallProgress(submission.getGenerationProgress());
         vo.setTotalDocuments(submission.getTotalDocuments());
         vo.setCompletedDocuments(submission.getCompletedDocuments());

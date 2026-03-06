@@ -26,6 +26,7 @@ import org.dromara.resource.mapper.BizBidProjectMapper;
 import org.dromara.resource.mapper.BizBidSubmissionMapper;
 import org.dromara.resource.mapper.BizSubmissionChapterMapper;
 import org.dromara.resource.service.IBidDocumentGenerationService;
+import org.dromara.resource.service.IAiAnalysisService;
 import org.dromara.resource.service.IBizBidSubmissionService;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
@@ -48,6 +49,7 @@ public class BizBidSubmissionServiceImpl implements IBizBidSubmissionService {
     private final BizBidProjectMapper bidProjectMapper;
     private final BizSubmissionChapterMapper chapterMapper;
     private final IBidDocumentGenerationService documentGenerationService;
+    private final IAiAnalysisService aiAnalysisService;
     private final Converter converter;
 
     @Override
@@ -80,7 +82,7 @@ public class BizBidSubmissionServiceImpl implements IBizBidSubmissionService {
         LambdaQueryWrapper<BizBidSubmission> lqw = Wrappers.lambdaQuery();
         lqw.eq(bo.getBidProjectId() != null, BizBidSubmission::getBidProjectId, bo.getBidProjectId());
         lqw.like(StringUtils.isNotBlank(bo.getProjectName()), BizBidSubmission::getProjectName, bo.getProjectName());
-        lqw.eq(StringUtils.isNotBlank(bo.getSubmissionStatus()), BizBidSubmission::getSubmissionStatus, bo.getSubmissionStatus());
+        lqw.eq(StringUtils.isNotBlank(bo.getStatus()), BizBidSubmission::getStatus, bo.getStatus());
         lqw.orderByDesc(BizBidSubmission::getCreateTime);
         return lqw;
     }
@@ -147,16 +149,25 @@ public class BizBidSubmissionServiceImpl implements IBizBidSubmissionService {
         submission.setTotalDocuments(totalDocs);
 
         // 5. 初始化状态
-        submission.setSubmissionStatus("draft");
-        submission.setWorkflowStage("pending_config");
+        submission.setStatus("draft");
         submission.setGenerationProgress(0);
         submission.setCompletedDocuments(0);
         submission.setFailedDocuments(0);
+
+        // 初始化竞争对手分析状态
+        submission.setCompetitorAnalysisStatus("none");
 
         submission.setRemark(bo.getRemark());
 
         // 6. 保存投标项目
         baseMapper.insert(submission);
+
+        // 7. 如果选择了分析竞争对手，触发异步分析
+        if (Boolean.TRUE.equals(bo.getAnalyzeCompetitors())) {
+            submission.setCompetitorAnalysisStatus("analyzing");
+            baseMapper.updateById(submission);
+            aiAnalysisService.analyzeCompetitorsAsync(submission.getId());
+        }
 
         return submission.getId();
     }
@@ -184,13 +195,12 @@ public class BizBidSubmissionServiceImpl implements IBizBidSubmissionService {
         }
 
         // 检查状态
-        if ("generating".equals(submission.getSubmissionStatus())) {
+        if ("generating".equals(submission.getStatus())) {
             throw new RuntimeException("投标项目正在生成中，请勿重复操作");
         }
 
         // 更新状态为生成中
-        submission.setSubmissionStatus("generating");
-        submission.setWorkflowStage("generating");
+        submission.setStatus("generating");
         submission.setGenerationProgress(0);
         submission.setStartTime(new Date());
         submission.setErrorMessage(null);
@@ -216,17 +226,16 @@ public class BizBidSubmissionServiceImpl implements IBizBidSubmissionService {
         }
 
         // 如果已经不在生成中（可能异步任务已完成或已取消），直接返回成功
-        if (!"generating".equals(submission.getSubmissionStatus())) {
-            log.info("投标项目[{}]当前状态为'{}'，非生成中，无需取消", submissionId, submission.getSubmissionStatus());
+        if (!"generating".equals(submission.getStatus())) {
+            log.info("投标项目[{}]当前状态为'{}'，非生成中，无需取消", submissionId, submission.getStatus());
             return true;
         }
 
         // 取消生成任务
         documentGenerationService.cancelGeneration(submissionId);
 
-        // 取消后回到：若有章节结构则 structure_generated，否则 configured
-        submission.setSubmissionStatus("draft");
-        submission.setWorkflowStage("1".equals(submission.getChapterStructureGenerated()) ? "structure_generated" : "configured");
+        // 取消后回到已配置状态
+        submission.setStatus("configured");
         submission.setGenerationProgress(0);
         submission.setEndTime(new Date());
         baseMapper.updateById(submission);
@@ -243,7 +252,7 @@ public class BizBidSubmissionServiceImpl implements IBizBidSubmissionService {
         }
 
         // 重置状态
-        submission.setSubmissionStatus("draft");
+        submission.setStatus("configured");
         submission.setGenerationProgress(0);
         submission.setCompletedDocuments(0);
         submission.setFailedDocuments(0);
@@ -269,11 +278,9 @@ public class BizBidSubmissionServiceImpl implements IBizBidSubmissionService {
             int totalDocs = calculateTotalDocuments(bo.getGenerationConfig());
             submission.setTotalDocuments(totalDocs);
         }
-        // 标记为已配置阶段（若章节结构已生成则保持更高阶段）
-        if (!"structure_generated".equals(submission.getWorkflowStage())
-            && !"generating".equals(submission.getWorkflowStage())
-            && !"completed".equals(submission.getWorkflowStage())) {
-            submission.setWorkflowStage("configured");
+        // 仅当当前为 draft 时，标记为已配置
+        if ("draft".equals(submission.getStatus())) {
+            submission.setStatus("configured");
         }
         return baseMapper.updateById(submission) > 0;
     }
@@ -285,9 +292,7 @@ public class BizBidSubmissionServiceImpl implements IBizBidSubmissionService {
         if (submission == null) {
             throw new RuntimeException("投标项目不存在");
         }
-        // TODO: 调用AI生成章节结构，暂时标记为已生成
-        submission.setChapterStructureGenerated("1");
-        submission.setWorkflowStage("structure_generated");
+        // 章节结构由 DocumentConfig 追踪，不再改顶层状态
         baseMapper.updateById(submission);
         return true;
     }
@@ -325,7 +330,7 @@ public class BizBidSubmissionServiceImpl implements IBizBidSubmissionService {
         if (submission == null) {
             throw new RuntimeException("投标项目不存在");
         }
-        if (!"completed".equals(submission.getSubmissionStatus())) {
+        if (!"generated".equals(submission.getStatus())) {
             throw new RuntimeException("标书尚未生成完成，无法导出");
         }
         // TODO: 实现标书文件导出逻辑

@@ -120,6 +120,18 @@ public class VectorSyncListener {
     }
 
     /**
+     * 同步竞争公司信息到向量库
+     */
+    public void syncCompetitorInfo(String tenantId, Long companyId, Map<String, Object> data) {
+        try {
+            companyVectorService.addCompetitorInfo(tenantId, companyId, data);
+            log.info("同步竞争公司信息到向量库成功: tenantId={}, companyId={}", tenantId, companyId);
+        } catch (Exception e) {
+            log.error("同步竞争公司信息到向量库失败", e);
+        }
+    }
+
+    /**
      * 删除向量数据
      */
     public void deleteVectorData(String tenantId, Long companyId) {

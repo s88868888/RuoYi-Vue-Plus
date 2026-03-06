@@ -365,6 +365,55 @@ public class CompanyVectorService {
     }
 
     /**
+     * 添加竞争公司信息到向量库
+     */
+    public boolean addCompetitorInfo(String tenantId, Long companyId, Map<String, Object> competitorData) {
+        try {
+            String collectionName = vectorStoreService.getCollectionName();
+
+            StringBuilder content = new StringBuilder();
+            content.append("竞争公司：");
+            if (competitorData.containsKey("companyName")) {
+                content.append("公司名称：").append(competitorData.get("companyName")).append("；");
+            }
+            if (competitorData.containsKey("companyType")) {
+                content.append("公司类型：").append(competitorData.get("companyType")).append("；");
+            }
+            if (competitorData.containsKey("businessScope")) {
+                content.append("主营业务：").append(competitorData.get("businessScope")).append("；");
+            }
+            if (competitorData.containsKey("competitorLevel")) {
+                content.append("竞争级别：").append(competitorData.get("competitorLevel")).append("；");
+            }
+            if (competitorData.containsKey("strengths")) {
+                content.append("竞争优势：").append(competitorData.get("strengths")).append("；");
+            }
+            if (competitorData.containsKey("weaknesses")) {
+                content.append("竞争劣势：").append(competitorData.get("weaknesses")).append("；");
+            }
+            if (competitorData.containsKey("mainProducts")) {
+                content.append("主要产品/服务：").append(competitorData.get("mainProducts")).append("；");
+            }
+
+            VectorDocument document = VectorDocument.builder()
+                .id(UUID.randomUUID().toString())
+                .tenantId(tenantId)
+                .companyId(companyId)
+                .docType("competitor")
+                .content(content.toString())
+                .metadata(competitorData)
+                .createTime(System.currentTimeMillis())
+                .build();
+
+            return vectorStoreService.insertDocument(collectionName, document);
+
+        } catch (Exception e) {
+            log.error("添加竞争公司信息到向量库失败", e);
+            return false;
+        }
+    }
+
+    /**
      * 搜索公司相关信息
      */
     public List<VectorSearchResult> searchCompanyData(String tenantId, Long companyId,

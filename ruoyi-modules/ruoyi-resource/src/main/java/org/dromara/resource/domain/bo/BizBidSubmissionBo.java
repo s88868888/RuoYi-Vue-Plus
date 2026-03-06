@@ -74,7 +74,7 @@ public class BizBidSubmissionBo extends BaseEntity {
     /**
      * 投标状态
      */
-    private String submissionStatus;
+    private String status;
 
     /**
      * 生成进度（0-100）
@@ -90,11 +90,6 @@ public class BizBidSubmissionBo extends BaseEntity {
      * 生成配置（JSON）
      */
     private String generationConfig;
-
-    /**
-     * 章节结构是否已生成
-     */
-    private String chapterStructureGenerated;
 
     /**
      * 总文档数
@@ -132,13 +127,13 @@ public class BizBidSubmissionBo extends BaseEntity {
     private String errorMessage;
 
     /**
-     * 工作流阶段
-     */
-    private String workflowStage;
-
-    /**
      * 备注
      */
     private String remark;
+
+    /**
+     * 是否分析竞争对手（创建时传参）
+     */
+    private Boolean analyzeCompetitors;
 
 }

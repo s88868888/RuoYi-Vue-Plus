@@ -74,9 +74,10 @@ public class BizBidSubmission extends TenantEntity {
     private String projectDesc;
 
     /**
-     * 投标状态：draft-草稿，generating-生成中，completed-已完成，failed-失败
+     * 投标状态：draft-草稿，configured-已配置，generating-生成中，generated-已生成，
+     * submitted-已投标，won-中标，lost-未中标，abandoned-废标/放弃，failed-生成失败
      */
-    private String submissionStatus;
+    private String status;
 
     /**
      * 生成进度（0-100）
@@ -92,11 +93,6 @@ public class BizBidSubmission extends TenantEntity {
      * 生成配置（JSON）
      */
     private String generationConfig;
-
-    /**
-     * 章节结构是否已生成
-     */
-    private String chapterStructureGenerated;
 
     /**
      * 总文档数
@@ -134,14 +130,23 @@ public class BizBidSubmission extends TenantEntity {
     private String errorMessage;
 
     /**
-     * 工作流阶段：pending_config-待配置，configured-已配置，structure_generated-结构已生成，
-     * generating-生成中，completed-已完成，failed-失败
-     */
-    private String workflowStage;
-
-    /**
      * 备注
      */
     private String remark;
+
+    /**
+     * 竞争对手分析结果（Markdown）
+     */
+    private String competitorAnalysisResult;
+
+    /**
+     * 分析状态：none-未分析，analyzing-分析中，completed-已完成，failed-失败
+     */
+    private String competitorAnalysisStatus;
+
+    /**
+     * 竞争力评分（0-100）
+     */
+    private Integer competitorScore;
 
 }

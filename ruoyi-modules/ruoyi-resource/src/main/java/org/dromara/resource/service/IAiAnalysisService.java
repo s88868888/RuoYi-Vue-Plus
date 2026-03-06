@@ -58,4 +58,20 @@ public interface IAiAnalysisService {
      */
     void analyzeMatchDegreeAsync(Long projectId, String prompt);
 
+    /**
+     * 竞争对手分析
+     *
+     * @param submissionId 投标项目ID
+     * @param prompt 自定义提示词（可选）
+     * @return 分析结果
+     */
+    String analyzeCompetitors(Long submissionId, String prompt);
+
+    /**
+     * 异步竞争对手分析
+     *
+     * @param submissionId 投标项目ID
+     */
+    void analyzeCompetitorsAsync(Long submissionId);
+
 }

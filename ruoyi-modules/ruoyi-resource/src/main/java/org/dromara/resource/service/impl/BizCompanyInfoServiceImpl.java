@@ -48,6 +48,7 @@ public class BizCompanyInfoServiceImpl extends ServiceImpl<BizCompanyInfoMapper,
     private final BizPatentMedalMapper patentMedalMapper;
     private final BizFinanceInfoMapper financeInfoMapper;
     private final BizProjectKnowledgeMapper projectKnowledgeMapper;
+    private final BizCompetitorMapper competitorMapper;
 
     @Override
     public BizCompanyInfoVo queryById(Long id) {
@@ -284,6 +285,23 @@ public class BizCompanyInfoServiceImpl extends ServiceImpl<BizCompanyInfoMapper,
             putIfNotNull(data, "content", k.getDescription());
             putIfNotNull(data, "projectType", k.getProjectType());
             asyncVectorSyncService.asyncSyncProjectKnowledge(tenantId, deptId, data);
+        }
+
+        // 竞争公司
+        List<BizCompetitorVo> competitorList = competitorMapper.selectVoList(
+            Wrappers.<BizCompetitor>lambdaQuery().eq(BizCompetitor::getDeptId, deptId));
+        for (BizCompetitorVo c : competitorList) {
+            Map<String, Object> data = new LinkedHashMap<>();
+            putIfNotNull(data, "companyName", c.getCompanyName());
+            putIfNotNull(data, "companyType", c.getCompanyType());
+            putIfNotNull(data, "businessScope", c.getBusinessScope());
+            putIfNotNull(data, "competitorLevel", c.getCompetitorLevel());
+            putIfNotNull(data, "strengths", c.getStrengths());
+            putIfNotNull(data, "weaknesses", c.getWeaknesses());
+            putIfNotNull(data, "mainProducts", c.getMainProducts());
+            putIfNotNull(data, "province", c.getProvince());
+            putIfNotNull(data, "city", c.getCity());
+            asyncVectorSyncService.asyncSyncCompetitorInfo(tenantId, deptId, data);
         }
     }
 

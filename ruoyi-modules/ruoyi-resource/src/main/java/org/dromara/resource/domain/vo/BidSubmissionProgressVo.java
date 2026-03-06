@@ -26,7 +26,7 @@ public class BidSubmissionProgressVo implements Serializable {
     /**
      * 投标状态
      */
-    private String submissionStatus;
+    private String status;
 
     /**
      * 整体进度（0-100）

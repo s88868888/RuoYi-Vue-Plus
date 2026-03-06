@@ -809,20 +809,20 @@ public void doGenerateChapterStructure(Long submissionId, Long documentConfigId,
         log.info("开始生成章节结构，投标项目ID: {}, 文档配置ID: {}", submissionId, documentConfigId);
 
         // 标记为生成中（进度0），刷新页面可感知状态
-        updateSubmissionProgress(submissionId, 0, 2);
+        updateSubmissionProgress(submissionId, 0);
 
         // 推送开始消息
         SseMessageUtils.sendMessage(userId, buildSseMessage("start", "开始生成章节结构", 0, null));
 
         // 1. 获取投标项目信息
         log.info("查询投标项目，submissionId: {}", submissionId);
-        updateSubmissionProgress(submissionId, 10, 2);
+        updateSubmissionProgress(submissionId, 10);
         SseMessageUtils.sendMessage(userId, buildSseMessage("progress", "正在加载项目信息", 10, null));
 
         BizBidSubmission submission = submissionMapper.selectById(submissionId);
         log.info("查询结果: {}", submission);
         if (submission == null) {
-            updateSubmissionProgress(submissionId, 0, 0);
+            updateSubmissionProgress(submissionId, 0);
             SseMessageUtils.sendMessage(userId, buildSseMessage("error", "投标项目不存在", 0, null));
             return;
         }
@@ -830,26 +830,26 @@ public void doGenerateChapterStructure(Long submissionId, Long documentConfigId,
         // 2. 获取文档配置
         BizDocumentConfig documentConfig = documentConfigMapper.selectById(documentConfigId);
         if (documentConfig == null) {
-            updateSubmissionProgress(submissionId, 0, 0);
+            updateSubmissionProgress(submissionId, 0);
             SseMessageUtils.sendMessage(userId, buildSseMessage("error", "文档配置不存在", 0, null));
             return;
         }
 
         // 3. 获取招标项目信息
-        updateSubmissionProgress(submissionId, 20, 2);
+        updateSubmissionProgress(submissionId, 20);
         SseMessageUtils.sendMessage(userId, buildSseMessage("progress", "正在加载招标项目信息", 20, null));
         BizBidProject project = projectMapper.selectById(submission.getBidProjectId());
         if (project == null) {
-            updateSubmissionProgress(submissionId, 0, 0);
+            updateSubmissionProgress(submissionId, 0);
             SseMessageUtils.sendMessage(userId, buildSseMessage("error", "招标项目不存在", 0, null));
             return;
         }
 
         // 4. 获取招标文件附件
-        updateSubmissionProgress(submissionId, 30, 2);
+        updateSubmissionProgress(submissionId, 30);
         SseMessageUtils.sendMessage(userId, buildSseMessage("progress", "正在加载招标文件", 30, null));
         if (StrUtil.isBlank(project.getAttachments())) {
-            updateSubmissionProgress(submissionId, 0, 0);
+            updateSubmissionProgress(submissionId, 0);
             SseMessageUtils.sendMessage(userId, buildSseMessage("error", "招标项目没有上传招标文件", 0, null));
             return;
         }
@@ -857,7 +857,7 @@ public void doGenerateChapterStructure(Long submissionId, Long documentConfigId,
         // 从 attachments 字段获取附件ID（可能是逗号分隔的多个ID）
         String[] attachmentIds = project.getAttachments().split(",");
         if (attachmentIds.length == 0) {
-            updateSubmissionProgress(submissionId, 0, 0);
+            updateSubmissionProgress(submissionId, 0);
             SseMessageUtils.sendMessage(userId, buildSseMessage("error", "招标项目没有上传招标文件", 0, null));
             return;
         }
@@ -866,20 +866,20 @@ public void doGenerateChapterStructure(Long submissionId, Long documentConfigId,
         Long ossId = Long.parseLong(attachmentIds[0].trim());
         SysOss sysOss = sysOssMapper.selectById(ossId);
         if (sysOss == null) {
-            updateSubmissionProgress(submissionId, 0, 0);
+            updateSubmissionProgress(submissionId, 0);
             SseMessageUtils.sendMessage(userId, buildSseMessage("error", "招标文件不存在", 0, null));
             return;
         }
 
         String fileUrl = sysOss.getUrl();
         if (StrUtil.isBlank(fileUrl)) {
-            updateSubmissionProgress(submissionId, 0, 0);
+            updateSubmissionProgress(submissionId, 0);
             SseMessageUtils.sendMessage(userId, buildSseMessage("error", "招标文件URL为空", 0, null));
             return;
         }
 
         // 5. 构建 AI 提示词
-        updateSubmissionProgress(submissionId, 40, 2);
+        updateSubmissionProgress(submissionId, 40);
         SseMessageUtils.sendMessage(userId, buildSseMessage("progress", "正在调用AI生成章节结构", 40, null));
         String prompt = buildChapterGenerationPrompt(project, documentConfig);
 
@@ -887,17 +887,17 @@ public void doGenerateChapterStructure(Long submissionId, Long documentConfigId,
         String aiResponse;
         try {
             aiResponse = aiChatService.chatWithDocumentUrl(fileUrl, prompt);
-            updateSubmissionProgress(submissionId, 70, 2);
+            updateSubmissionProgress(submissionId, 70);
             SseMessageUtils.sendMessage(userId, buildSseMessage("progress", "AI生成完成，正在解析结果", 70, null));
         } catch (Exception e) {
             log.error("AI 生成章节结构失败", e);
-            updateSubmissionProgress(submissionId, 0, 0);
+            updateSubmissionProgress(submissionId, 0);
             SseMessageUtils.sendMessage(userId, buildSseMessage("error", "AI 生成章节结构失败: " + e.getMessage(), 0, null));
             return;
         }
 
         // 7. 解析 AI 返回的 JSON 并插入数据库（递归插入，自动处理父子关系）
-        updateSubmissionProgress(submissionId, 80, 2);
+        updateSubmissionProgress(submissionId, 80);
         SseMessageUtils.sendMessage(userId, buildSseMessage("progress", "正在保存章节结构", 80, null));
         parseChapterJson(aiResponse, submissionId, documentConfigId);
 
@@ -919,7 +919,7 @@ public void doGenerateChapterStructure(Long submissionId, Long documentConfigId,
 
     } catch (Exception e) {
         log.error("生成章节结构异常", e);
-        updateSubmissionProgress(submissionId, 0, 0);
+        updateSubmissionProgress(submissionId, 0);
         SseMessageUtils.sendMessage(userId, buildSseMessage("error", "生成章节结构异常: " + e.getMessage(), 0, null));
     } finally {
         TenantHelper.clearDynamic();
@@ -930,14 +930,12 @@ public void doGenerateChapterStructure(Long submissionId, Long documentConfigId,
  * 更新投标项目的章节生成进度
  * @param submissionId 投标项目ID
  * @param progress 进度(0-100)
- * @param chapterStructureGenerated 章节结构状态: 0=未生成, 1=已生成, 2=生成中
  */
-private void updateSubmissionProgress(Long submissionId, int progress, int chapterStructureGenerated) {
+private void updateSubmissionProgress(Long submissionId, int progress) {
     try {
         BizBidSubmission update = new BizBidSubmission();
         update.setId(submissionId);
         update.setGenerationProgress(progress);
-        update.setChapterStructureGenerated(String.valueOf(chapterStructureGenerated));
         submissionMapper.updateById(update);
     } catch (Exception e) {
         log.warn("更新生成进度失败: {}", e.getMessage());
@@ -946,19 +944,12 @@ private void updateSubmissionProgress(Long submissionId, int progress, int chapt
 
 /**
  * 章节结构生成成功后的统一收尾
- * - 更新状态：chapter_structure_generated=1，workflow_stage=structure_generated
  * - 更新标书配置状态为 structure_generated（已生成目录）
  * - 重新计算投标项目整体进度
  * - 发送 SSE success，供前端自动刷新目录
  */
 private void markChapterStructureGeneratedSuccess(Long submissionId, Long documentConfigId, Long userId) {
     try {
-        BizBidSubmission update = new BizBidSubmission();
-        update.setId(submissionId);
-        update.setChapterStructureGenerated("1");
-        update.setWorkflowStage("structure_generated");
-        submissionMapper.updateById(update);
-
         // 更新标书配置状态为"已生成目录"
         BizDocumentConfig configUpdate = new BizDocumentConfig();
         configUpdate.setId(documentConfigId);

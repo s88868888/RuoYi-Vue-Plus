@@ -129,7 +129,7 @@ public class BidDocumentGenerationServiceImpl implements IBidDocumentGenerationS
 
             if (configs.isEmpty()) {
                 log.warn("投标项目没有配置文档: {}", submissionId);
-                submission.setSubmissionStatus("failed");
+                submission.setStatus("failed");
                 submission.setErrorMessage("没有配置文档");
                 submissionMapper.updateById(submission);
                 return;
@@ -203,7 +203,7 @@ public class BidDocumentGenerationServiceImpl implements IBidDocumentGenerationS
             }
 
             // 8. 完成
-            submission.setSubmissionStatus("completed");
+            submission.setStatus("generated");
             submission.setGenerationProgress(100);
             submission.setEndTime(new Date());
             submission.setCompletedDocuments(completedDocs);
@@ -214,7 +214,7 @@ public class BidDocumentGenerationServiceImpl implements IBidDocumentGenerationS
 
         } catch (Exception e) {
             log.error("投标项目生成失败: {}", submissionId, e);
-            submission.setSubmissionStatus("failed");
+            submission.setStatus("failed");
             submission.setErrorMessage(e.getMessage());
             submission.setEndTime(new Date());
             submissionMapper.updateById(submission);
@@ -547,7 +547,7 @@ public class BidDocumentGenerationServiceImpl implements IBidDocumentGenerationS
 
         Map<String, Object> event = new HashMap<>();
         event.put("submissionId", submission.getId());
-        event.put("submissionStatus", submission.getSubmissionStatus());
+        event.put("status", submission.getStatus());
         event.put("overallProgress", submission.getGenerationProgress());
         event.put("documentId", doc.getId());
         event.put("documentName", doc.getDocumentName());
@@ -621,7 +621,7 @@ public class BidDocumentGenerationServiceImpl implements IBidDocumentGenerationS
 
         BidSubmissionProgressVo progressVo = new BidSubmissionProgressVo();
         progressVo.setSubmissionId(submissionId);
-        progressVo.setSubmissionStatus(submission.getSubmissionStatus());
+        progressVo.setStatus(submission.getStatus());
         progressVo.setOverallProgress(submission.getGenerationProgress());
         progressVo.setTotalDocuments(submission.getTotalDocuments());
         progressVo.setCompletedDocuments(submission.getCompletedDocuments());

@@ -86,6 +86,14 @@ public class AsyncVectorSyncService {
     }
 
     /**
+     * 异步同步竞争公司信息
+     */
+    @Async("vectorSyncExecutor")
+    public void asyncSyncCompetitorInfo(String tenantId, Long companyId, Map<String, Object> data) {
+        vectorSyncListener.syncCompetitorInfo(tenantId, companyId, data);
+    }
+
+    /**
      * 异步删除向量数据
      */
     @Async("vectorSyncExecutor")

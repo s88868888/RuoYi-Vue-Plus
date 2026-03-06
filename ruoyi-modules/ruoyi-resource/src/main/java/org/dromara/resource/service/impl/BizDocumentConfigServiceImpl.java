@@ -115,7 +115,7 @@ public class BizDocumentConfigServiceImpl implements IBizDocumentConfigService {
     }
 
     /**
-     * 同步更新父级投标项目的 workflowStage 和 selectedCompanies
+     * 同步更新父级投标项目的 status 和 selectedCompanies
      */
     private void syncSubmissionConfigStatus(Long submissionId) {
         if (submissionId == null) {
@@ -144,15 +144,15 @@ public class BizDocumentConfigServiceImpl implements IBizDocumentConfigService {
                 .collect(Collectors.toList());
             submission.setSelectedCompanies(JSON.toJSONString(companyList));
 
-            // 如果当前是 pending_config，更新为 configured
-            if ("pending_config".equals(submission.getWorkflowStage())) {
-                submission.setWorkflowStage("configured");
+            // 如果当前是 draft，更新为 configured
+            if ("draft".equals(submission.getStatus())) {
+                submission.setStatus("configured");
             }
         } else {
             // 无配置，重置
             submission.setSelectedCompanies("[]");
-            if ("configured".equals(submission.getWorkflowStage())) {
-                submission.setWorkflowStage("pending_config");
+            if ("configured".equals(submission.getStatus())) {
+                submission.setStatus("draft");
             }
         }
 

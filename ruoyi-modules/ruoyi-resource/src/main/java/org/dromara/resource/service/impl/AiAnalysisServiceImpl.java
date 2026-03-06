@@ -12,8 +12,12 @@ import org.dromara.common.oss.core.OssClient;
 import org.dromara.common.oss.factory.OssFactory;
 import org.dromara.resource.domain.BizBidProject;
 import org.dromara.resource.domain.BizCompanyInfo;
+import org.dromara.resource.domain.BizCompetitor;
+import org.dromara.resource.domain.BizBidSubmission;
 import org.dromara.resource.mapper.BizBidProjectMapper;
 import org.dromara.resource.mapper.BizCompanyInfoMapper;
+import org.dromara.resource.mapper.BizCompetitorMapper;
+import org.dromara.resource.mapper.BizBidSubmissionMapper;
 import org.dromara.common.tenant.helper.TenantHelper;
 import org.dromara.resource.service.BidDocumentVectorService;
 import org.dromara.resource.service.IAiAnalysisService;
@@ -50,6 +54,8 @@ public class AiAnalysisServiceImpl implements IAiAnalysisService {
     private final BizCompanyInfoMapper companyInfoMapper;
     private final SysDeptMapper sysDeptMapper;
     private final BidDocumentVectorService bidDocumentVectorService;
+    private final BizCompetitorMapper competitorMapper;
+    private final BizBidSubmissionMapper bidSubmissionMapper;
 
     /**
      * 默认分析提示词
@@ -613,6 +619,180 @@ public class AiAnalysisServiceImpl implements IAiAnalysisService {
         } catch (NumberFormatException e) {
             return null;
         }
+    }
+
+    /**
+     * 竞争对手分析提示词
+     */
+    private static final String COMPETITOR_ANALYSIS_PROMPT = """
+        你是一位资深的招投标分析专家。请根据以下招标项目信息和竞争对手资料，对竞争态势进行深入分析。
+
+        ## 招标项目信息
+        - 项目名称：{projectName}
+        - 招标单位：{bidOrg}
+        - 项目类型：{projectType}
+        - 预算金额：{budgetAmount}元
+        - 项目区域：{projectRegion}
+        - 招标方式：{bidMethod}
+        - 项目描述：{projectDesc}
+
+        ## 我方公司信息
+        {companyInfoSection}
+
+        ## 竞争对手信息
+        {competitorSection}
+
+        ## 分析要求
+        请从以下维度进行分析，并给出竞争力总评分（score:XX 格式）：
+
+        1. **竞争态势总览**：概述本项目竞争格局
+        2. **逐一竞争对手分析**：每个竞争对手的优劣势、中标可能性
+        3. **我方竞争力评估**：我方在本项目中的竞争优势和劣势
+        4. **对比分析表**：维度包括资质、业绩、技术能力、价格、地域优势等
+        5. **投标策略建议**：针对竞争对手特点的应对策略
+        6. **风险提示**：主要竞争风险及应对措施
+
+        请在报告开头给出总体竞争力评分：score:XX（0-100分）
+        """;
+
+    @Override
+    public String analyzeCompetitors(Long submissionId, String prompt) {
+        BizBidSubmission submission = bidSubmissionMapper.selectById(submissionId);
+        if (submission == null) {
+            throw new RuntimeException("投标项目不存在");
+        }
+
+        // 获取关联的招标项目（用于附件和详细信息）
+        BizBidProject project = null;
+        if (submission.getBidProjectId() != null) {
+            project = bidProjectMapper.selectById(submission.getBidProjectId());
+        }
+
+        String tenantId = submission.getTenantId();
+
+        try {
+            // 1. 构建己方公司信息
+            String companyInfoSection;
+            if (project != null) {
+                companyInfoSection = buildCompanyInfoSection(tenantId, project);
+            } else {
+                companyInfoSection = "（暂无我方公司详细信息）";
+            }
+
+            // 2. 构建竞争对手信息段落
+            String competitorSection = buildCompetitorSection(tenantId);
+
+            // 3. 构建提示词
+            String template = StrUtil.isNotBlank(prompt) ? prompt : COMPETITOR_ANALYSIS_PROMPT;
+            String finalPrompt = template
+                .replace("{projectName}", StrUtil.nullToEmpty(submission.getProjectName()))
+                .replace("{bidOrg}", StrUtil.nullToEmpty(submission.getBidOrg()))
+                .replace("{projectType}", StrUtil.nullToEmpty(submission.getProjectType()))
+                .replace("{budgetAmount}", submission.getBudgetAmount() != null ? submission.getBudgetAmount().toString() : "未知")
+                .replace("{projectRegion}", StrUtil.nullToEmpty(submission.getProjectRegion()))
+                .replace("{bidMethod}", StrUtil.nullToEmpty(submission.getBidMethod()))
+                .replace("{projectDesc}", StrUtil.nullToEmpty(submission.getProjectDesc()))
+                .replace("{companyInfoSection}", companyInfoSection)
+                .replace("{competitorSection}", competitorSection);
+
+            // 4. 调用AI分析（如有招标文件附件则携带）
+            String attachments = project != null ? project.getAttachments() : null;
+            String result = chatWithAttachments(attachments, finalPrompt);
+
+            // 5. 解析竞争力评分
+            Integer score = parseBestMatchScore(result);
+
+            // 6. 更新投标项目
+            LambdaUpdateWrapper<BizBidSubmission> wrapper = new LambdaUpdateWrapper<BizBidSubmission>()
+                .eq(BizBidSubmission::getId, submissionId)
+                .set(BizBidSubmission::getCompetitorAnalysisResult, result)
+                .set(BizBidSubmission::getCompetitorAnalysisStatus, "completed");
+            if (score != null) {
+                wrapper.set(BizBidSubmission::getCompetitorScore, score);
+            }
+            bidSubmissionMapper.update(wrapper);
+
+            return result;
+        } catch (Exception e) {
+            log.error("竞争对手分析失败, submissionId={}", submissionId, e);
+            bidSubmissionMapper.update(new LambdaUpdateWrapper<BizBidSubmission>()
+                .eq(BizBidSubmission::getId, submissionId)
+                .set(BizBidSubmission::getCompetitorAnalysisStatus, "failed")
+                .set(BizBidSubmission::getCompetitorAnalysisResult, "分析失败：" + e.getMessage()));
+            throw new RuntimeException("竞争对手分析失败：" + e.getMessage());
+        }
+    }
+
+    @Async
+    @Override
+    public void analyzeCompetitorsAsync(Long submissionId) {
+        TenantHelper.ignore(() -> {
+            BizBidSubmission submission = bidSubmissionMapper.selectById(submissionId);
+            if (submission == null) {
+                log.error("投标项目不存在：{}", submissionId);
+                return;
+            }
+            bidSubmissionMapper.update(new LambdaUpdateWrapper<BizBidSubmission>()
+                .eq(BizBidSubmission::getId, submissionId)
+                .set(BizBidSubmission::getCompetitorAnalysisStatus, "analyzing"));
+            try {
+                analyzeCompetitors(submissionId, null);
+                log.info("投标项目{}竞争对手分析完成", submissionId);
+            } catch (Exception e) {
+                log.error("异步竞争对手分析失败", e);
+            }
+        });
+    }
+
+    /**
+     * 构建竞争对手信息段落
+     */
+    private String buildCompetitorSection(String tenantId) {
+        List<BizCompetitor> competitors = competitorMapper.selectList(
+            new LambdaQueryWrapper<BizCompetitor>()
+                .eq(BizCompetitor::getTenantId, tenantId));
+
+        if (competitors.isEmpty()) {
+            return "（当前租户下暂无竞争对手信息）";
+        }
+
+        StringBuilder sb = new StringBuilder();
+        for (int i = 0; i < competitors.size(); i++) {
+            BizCompetitor comp = competitors.get(i);
+            sb.append("### 竞争对手").append(i + 1).append("：").append(StrUtil.nullToEmpty(comp.getCompanyName())).append("\n\n");
+
+            if (StrUtil.isNotBlank(comp.getCompanyType())) {
+                sb.append("- 公司类型：").append(comp.getCompanyType()).append("\n");
+            }
+            if (StrUtil.isNotBlank(comp.getBusinessScope())) {
+                sb.append("- 主营业务：").append(comp.getBusinessScope()).append("\n");
+            }
+            if (StrUtil.isNotBlank(comp.getRegisteredCapital())) {
+                sb.append("- 注册资本：").append(comp.getRegisteredCapital()).append("万元\n");
+            }
+            if (StrUtil.isNotBlank(comp.getFoundedYear())) {
+                sb.append("- 成立年份：").append(comp.getFoundedYear()).append("\n");
+            }
+            if (StrUtil.isNotBlank(comp.getProvince()) || StrUtil.isNotBlank(comp.getCity())) {
+                sb.append("- 所在地区：").append(StrUtil.nullToEmpty(comp.getProvince())).append(" ").append(StrUtil.nullToEmpty(comp.getCity())).append("\n");
+            }
+            if (StrUtil.isNotBlank(comp.getMainProducts())) {
+                sb.append("- 主要产品/服务：").append(comp.getMainProducts()).append("\n");
+            }
+            if (StrUtil.isNotBlank(comp.getStrengths())) {
+                sb.append("- 竞争优势：").append(comp.getStrengths()).append("\n");
+            }
+            if (StrUtil.isNotBlank(comp.getWeaknesses())) {
+                sb.append("- 竞争劣势：").append(comp.getWeaknesses()).append("\n");
+            }
+            if (StrUtil.isNotBlank(comp.getCompetitorLevel())) {
+                sb.append("- 竞争级别：").append(comp.getCompetitorLevel()).append("\n");
+            }
+
+            sb.append("\n---\n\n");
+        }
+
+        return sb.toString();
     }
 
 }

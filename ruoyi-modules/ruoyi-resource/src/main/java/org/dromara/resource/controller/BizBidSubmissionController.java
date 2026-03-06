@@ -23,6 +23,7 @@ import org.dromara.resource.domain.vo.BizBidSubmissionVo;
 import org.dromara.resource.domain.vo.BizSubmissionChapterVo;
 import org.dromara.resource.service.IBizBidProjectService;
 import org.dromara.resource.service.IBizBidSubmissionService;
+import org.dromara.resource.service.IAiAnalysisService;
 import org.dromara.resource.service.SseProgressService;
 import org.dromara.system.domain.vo.SysOssVo;
 import org.dromara.system.service.ISysOssService;
@@ -50,6 +51,7 @@ public class BizBidSubmissionController extends BaseController {
     private final SseProgressService sseProgressService;
     private final IBizBidProjectService bizBidProjectService;
     private final ISysOssService sysOssService;
+    private final IAiAnalysisService aiAnalysisService;
 
     /**
      * 查询投标项目列表
@@ -230,6 +232,20 @@ public class BizBidSubmissionController extends BaseController {
     @PostMapping("/{id}/regenerate")
     public R<Void> regenerate(@NotNull(message = "主键不能为空") @PathVariable Long id) {
         return toAjax(bizBidSubmissionService.regenerate(id));
+    }
+
+    /**
+     * 手动触发竞争对手分析
+     *
+     * @param id 投标项目ID
+     */
+    @SaCheckPermission("bid:submission:edit")
+    @Log(title = "投标项目", businessType = BusinessType.UPDATE)
+    @RepeatSubmit()
+    @PostMapping("/{id}/analyzeCompetitors")
+    public R<Void> analyzeCompetitors(@NotNull(message = "主键不能为空") @PathVariable Long id) {
+        aiAnalysisService.analyzeCompetitorsAsync(id);
+        return R.ok();
     }
 
     /**

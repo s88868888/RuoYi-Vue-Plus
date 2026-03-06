@@ -86,7 +86,7 @@ public class BizBidSubmissionVo implements Serializable {
      */
     @ExcelProperty(value = "投标状态", converter = ExcelDictConvert.class)
     @ExcelDictFormat(dictType = "bid_submission_status")
-    private String submissionStatus;
+    private String status;
 
     /**
      * 生成进度（0-100）
@@ -103,11 +103,6 @@ public class BizBidSubmissionVo implements Serializable {
      * 生成配置（JSON）
      */
     private String generationConfig;
-
-    /**
-     * 章节结构是否已生成
-     */
-    private String chapterStructureGenerated;
 
     /**
      * 总文档数
@@ -150,12 +145,6 @@ public class BizBidSubmissionVo implements Serializable {
     private String errorMessage;
 
     /**
-     * 工作流阶段：pending_config-待配置，configured-已配置，structure_generated-结构已生成，
-     * generating-生成中，completed-已完成，failed-失败
-     */
-    private String workflowStage;
-
-    /**
      * 备注
      */
     @ExcelProperty(value = "备注")
@@ -176,5 +165,20 @@ public class BizBidSubmissionVo implements Serializable {
      */
     @ExcelProperty(value = "创建时间")
     private Date createTime;
+
+    /**
+     * 竞争对手分析结果（Markdown）
+     */
+    private String competitorAnalysisResult;
+
+    /**
+     * 分析状态：none-未分析，analyzing-分析中，completed-已完成，failed-失败
+     */
+    private String competitorAnalysisStatus;
+
+    /**
+     * 竞争力评分（0-100）
+     */
+    private Integer competitorScore;
 
 }
