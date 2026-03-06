@@ -7,6 +7,9 @@ import org.dromara.resource.domain.*;
 import org.dromara.resource.mapper.*;
 import org.dromara.resource.service.IBidDocumentGenerationService;
 import org.dromara.resource.service.agent.*;
+import org.dromara.resource.service.agent.ChapterDataEnricher.AttachmentRef;
+import org.dromara.resource.service.agent.ChapterDataEnricher.ChapterContentType;
+import org.dromara.resource.service.agent.ChapterDataEnricher.EnrichmentResult;
 import org.dromara.resource.domain.vo.BidSubmissionProgressVo;
 import org.dromara.system.domain.SysOss;
 import org.dromara.system.mapper.SysOssMapper;
@@ -53,6 +56,7 @@ public class BidDocumentGenerationServiceImplV2 implements IBidDocumentGeneratio
     private final ChapterGenerationAgent chapterGenerationAgent;
     private final DocumentAssemblyAgent documentAssemblyAgent;
     private final ImageRetrievalAgent imageRetrievalAgent;
+    private final ChapterDataEnricher chapterDataEnricher;
 
     @Async("bidGenerationExecutor")
     @Override
@@ -185,8 +189,37 @@ public class BidDocumentGenerationServiceImplV2 implements IBidDocumentGeneratio
                                 // 模板章节：填充公司信息
                                 content = processTemplateChapter(chapter, companyInfo, parseResult);
                             } else {
-                                // AI生成章节
+                                // AI生成章节：先进行数据富化
+                                EnrichmentResult enrichment =
+                                    chapterDataEnricher.enrich(chapter, document.getCompanyId());
+
+                                if (enrichment.getContentType() != ChapterContentType.NONE) {
+                                    context.setStructuredData(enrichment.getStructuredDataMarkdown());
+                                    context.setFormatInstructions(enrichment.getFormatInstructions());
+                                    context.setChapterContentType(enrichment.getContentType().name());
+
+                                    logProgress(submissionId, document.getId(),
+                                        "数据富化: " + chapter.getChapterTitle(),
+                                        25 + (completedDocuments * 60 / totalDocuments) +
+                                            (processedChapters * 60 / totalDocuments / totalChapters),
+                                        String.format("检测为规定格式[%s]，注入%d条数据",
+                                            enrichment.getContentType(), enrichment.getRecordCount()));
+                                }
+
+                                // AI生成（prompt 现在可能包含结构化数据）
                                 content = chapterGenerationAgent.generateChapter(chapter, context);
+
+                                // 自动追加附件图片
+                                if (enrichment.getContentType() != ChapterContentType.NONE
+                                    && enrichment.getAttachments() != null
+                                    && !enrichment.getAttachments().isEmpty()) {
+                                    content = appendAttachmentImages(content, enrichment.getAttachments());
+                                }
+
+                                // 清除 per-chapter 覆盖，避免影响下一章节
+                                context.setStructuredData(null);
+                                context.setFormatInstructions(null);
+                                context.setChapterContentType(null);
                             }
 
                             // 解析并替换图片占位符为真实图片
@@ -367,6 +400,57 @@ public class BidDocumentGenerationServiceImplV2 implements IBidDocumentGeneratio
         context.setScoringCriteria(parseResult.getScoringCriteria());
 
         return context;
+    }
+
+    /**
+     * 在章节内容末尾追加附件证明材料图片
+     *
+     * @param content     原始章节内容
+     * @param attachments 附件引用列表
+     * @return 追加了附件图片的内容
+     */
+    private String appendAttachmentImages(String content, List<AttachmentRef> attachments) {
+        if (attachments == null || attachments.isEmpty()) {
+            return content;
+        }
+
+        // 上限 30 张，防止章节过长
+        int limit = Math.min(attachments.size(), 30);
+        List<AttachmentRef> limited = attachments.subList(0, limit);
+
+        // 按类型分组
+        Map<String, List<AttachmentRef>> grouped = limited.stream()
+            .collect(Collectors.groupingBy(AttachmentRef::getType, LinkedHashMap::new, Collectors.toList()));
+
+        StringBuilder sb = new StringBuilder(content);
+        sb.append("\n\n---\n\n");
+        sb.append("### 附件：证明材料\n\n");
+
+        for (Map.Entry<String, List<AttachmentRef>> entry : grouped.entrySet()) {
+            String typeLabel = switch (entry.getKey()) {
+                case "QUALIFICATION" -> "资质证书";
+                case "PERFORMANCE" -> "业绩证明";
+                case "PERSONNEL" -> "人员证书";
+                case "PATENT" -> "专利证书";
+                case "FINANCE" -> "财务资料";
+                case "PRODUCT" -> "产品/设备";
+                case "COMPANY" -> "企业证照";
+                default -> entry.getKey();
+            };
+            sb.append("#### ").append(typeLabel).append("\n\n");
+
+            for (AttachmentRef ref : entry.getValue()) {
+                sb.append(imageRetrievalAgent.buildImageHtml(ref.getImageUrl(), ref.getCaption()));
+            }
+            sb.append("\n");
+        }
+
+        if (attachments.size() > limit) {
+            sb.append(String.format("<p style=\"text-align:center;color:#999;font-size:12px;\">"
+                + "（共%d张附件，此处展示前%d张）</p>\n", attachments.size(), limit));
+        }
+
+        return sb.toString();
     }
 
     /**

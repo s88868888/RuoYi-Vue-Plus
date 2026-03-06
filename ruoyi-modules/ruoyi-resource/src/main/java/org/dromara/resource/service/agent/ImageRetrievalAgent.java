@@ -277,7 +277,7 @@ public class ImageRetrievalAgent {
     /**
      * 构建图片HTML（使用div+data-align确保在AiEditor中居中显示）
      */
-    private String buildImageHtml(String urlOrOssId, String caption) {
+    public String buildImageHtml(String urlOrOssId, String caption) {
         String url = resolveOssUrl(urlOrOssId);
         return String.format(
             "<div style=\"text-align:center\"><img src=\"%s\" alt=\"%s\" data-align=\"center\" style=\"max-width:80%%;border:1px solid #eee;border-radius:4px;\" /></div>" +
@@ -289,7 +289,7 @@ public class ImageRetrievalAgent {
      * 将OSS ID转换为可访问的URL
      * 如果传入的是纯数字（OSS ID），从sys_oss表查询实际URL；否则原样返回
      */
-    private String resolveOssUrl(String ossIdOrUrl) {
+    public String resolveOssUrl(String ossIdOrUrl) {
         if (ossIdOrUrl == null || ossIdOrUrl.isBlank()) {
             return ossIdOrUrl;
         }

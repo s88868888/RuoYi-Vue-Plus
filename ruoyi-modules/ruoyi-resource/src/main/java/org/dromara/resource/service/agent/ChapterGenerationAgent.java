@@ -59,7 +59,7 @@ public class ChapterGenerationAgent {
     }
 
     /**
-     * 构建章节生成提示词（含文档类型指引 + 双重RAG知识注入）
+     * 构建章节生成提示词（含文档类型指引 + 双重RAG知识注入 + 结构化数据注入）
      */
     private String buildChapterPrompt(BizSubmissionChapter chapter, GenerationContext context) {
         // 文档类型指引
@@ -69,23 +69,76 @@ public class ChapterGenerationAgent {
             default -> "你正在生成整本标书内容，需要平衡商务与技术内容。";
         };
 
+        boolean hasStructuredData = context.getStructuredData() != null && !context.getStructuredData().isBlank();
+
         // 招标文件知识（从Milvus检索的bid_doc知识）
         String bidDocSection = "";
         if (context.getBidDocKnowledge() != null && !context.getBidDocKnowledge().isEmpty()) {
-            bidDocSection = "\n\n【招标文件相关内容】\n"
-                + context.getBidDocKnowledge().stream()
-                    .filter(r -> !"requirement".equals(r.getDocType()) && !"scoring".equals(r.getDocType()))
-                    .map(VectorSearchResult::getContent)
-                    .collect(Collectors.joining("\n---\n"));
+            // 有结构化数据时缩减到 top 3，为结构化数据腾出 prompt 空间
+            var filtered = context.getBidDocKnowledge().stream()
+                .filter(r -> !"requirement".equals(r.getDocType()) && !"scoring".equals(r.getDocType()));
+            if (hasStructuredData) {
+                filtered = filtered.limit(3);
+            }
+            String content = filtered
+                .map(VectorSearchResult::getContent)
+                .collect(Collectors.joining("\n---\n"));
+            if (!content.isBlank()) {
+                bidDocSection = "\n\n【招标文件相关内容】\n" + content;
+            }
         }
 
         // 公司知识库内容
         String companyKnowledgeSection = "";
         if (context.getRelevantKnowledge() != null && !context.getRelevantKnowledge().isEmpty()) {
-            companyKnowledgeSection = "\n\n【公司知识库内容】\n"
-                + context.getRelevantKnowledge().stream()
-                    .map(VectorSearchResult::getContent)
-                    .collect(Collectors.joining("\n---\n"));
+            var stream = context.getRelevantKnowledge().stream();
+            if (hasStructuredData) {
+                stream = stream.limit(3);
+            }
+            String content = stream
+                .map(VectorSearchResult::getContent)
+                .collect(Collectors.joining("\n---\n"));
+            if (!content.isBlank()) {
+                companyKnowledgeSection = "\n\n【公司知识库内容】\n" + content;
+            }
+        }
+
+        // 结构化数据和格式指令（仅当有规定格式数据时注入）
+        String structuredDataSection = "";
+        String imageRuleSection;
+        if (hasStructuredData) {
+            structuredDataSection = "\n\n【知识库结构化数据（真实记录，必须使用）】\n"
+                + context.getStructuredData()
+                + "\n\n【格式要求】\n"
+                + context.getFormatInstructions();
+
+            imageRuleSection = """
+
+            【图片说明】
+            本章节的证明材料图片将自动附加在章节末尾，
+            你不需要插入 {{IMAGE:...}} 占位符。
+            请专注于基于上方结构化数据生成规范的表格内容。""";
+        } else {
+            imageRuleSection = """
+
+            【图片占位符规则】
+            在生成内容时，当你提到具体的人员、资质证书、业绩项目、专利或财务信息时，
+            请在提及处的下一行插入图片占位符，格式如下：
+            - 人员：{{IMAGE:PERSONNEL:人员姓名}}
+            - 资质：{{IMAGE:QUALIFICATION:证书名称}}
+            - 业绩：{{IMAGE:PERFORMANCE:项目名称}}
+            - 专利：{{IMAGE:PATENT:专利名称}}
+            - 财务：{{IMAGE:FINANCE:财务报告名称}}
+
+            示例：
+            项目经理张三具有丰富的项目管理经验...
+            {{IMAGE:PERSONNEL:张三}}
+
+            公司持有建筑工程施工总承包壹级资质...
+            {{IMAGE:QUALIFICATION:建筑工程施工总承包壹级}}
+
+            注意：只在提到具体名称时才插入占位符，不要凭空编造人员或资质名称。
+            占位符中的名称必须与正文中提到的名称一致。""";
         }
 
         return String.format("""
@@ -110,6 +163,7 @@ public class ChapterGenerationAgent {
             %s
             %s
             %s
+            %s
             【章节要求】
             章节编号：%s
             章节标题：%s
@@ -122,25 +176,7 @@ public class ChapterGenerationAgent {
             4. 使用Markdown格式
             5. 包含必要的表格、列表等结构化内容
             6. 字数适中，不少于500字
-
-            【图片占位符规则】
-            在生成内容时，当你提到具体的人员、资质证书、业绩项目、专利或财务信息时，
-            请在提及处的下一行插入图片占位符，格式如下：
-            - 人员：{{IMAGE:PERSONNEL:人员姓名}}
-            - 资质：{{IMAGE:QUALIFICATION:证书名称}}
-            - 业绩：{{IMAGE:PERFORMANCE:项目名称}}
-            - 专利：{{IMAGE:PATENT:专利名称}}
-            - 财务：{{IMAGE:FINANCE:财务报告名称}}
-
-            示例：
-            项目经理张三具有丰富的项目管理经验...
-            {{IMAGE:PERSONNEL:张三}}
-
-            公司持有建筑工程施工总承包壹级资质...
-            {{IMAGE:QUALIFICATION:建筑工程施工总承包壹级}}
-
-            注意：只在提到具体名称时才插入占位符，不要凭空编造人员或资质名称。
-            占位符中的名称必须与正文中提到的名称一致。
+            %s
 
             请直接输出章节内容，不要包含章节标题（标题会自动添加）。
             """,
@@ -156,9 +192,11 @@ public class ChapterGenerationAgent {
             formatScoringCriteria(context.getScoringCriteria()),
             bidDocSection,
             companyKnowledgeSection,
+            structuredDataSection,
             chapter.getChapterNo(),
             chapter.getChapterTitle(),
-            chapter.getChapterLevel()
+            chapter.getChapterLevel(),
+            imageRuleSection
         );
     }
 
@@ -258,6 +296,12 @@ public class ChapterGenerationAgent {
         private String documentType;
         /** Milvus 检索到的招标文件知识 */
         private java.util.List<VectorSearchResult> bidDocKnowledge;
+        /** 规定格式章节的结构化数据（Markdown 表格） */
+        private String structuredData;
+        /** 规定格式章节的生成指令 */
+        private String formatInstructions;
+        /** 检测到的章节内容类型 */
+        private String chapterContentType;
 
         // Getters and Setters
         public String getProjectName() { return projectName; }
@@ -282,6 +326,12 @@ public class ChapterGenerationAgent {
         public void setDocumentType(String documentType) { this.documentType = documentType; }
         public java.util.List<VectorSearchResult> getBidDocKnowledge() { return bidDocKnowledge; }
         public void setBidDocKnowledge(java.util.List<VectorSearchResult> bidDocKnowledge) { this.bidDocKnowledge = bidDocKnowledge; }
+        public String getStructuredData() { return structuredData; }
+        public void setStructuredData(String structuredData) { this.structuredData = structuredData; }
+        public String getFormatInstructions() { return formatInstructions; }
+        public void setFormatInstructions(String formatInstructions) { this.formatInstructions = formatInstructions; }
+        public String getChapterContentType() { return chapterContentType; }
+        public void setChapterContentType(String chapterContentType) { this.chapterContentType = chapterContentType; }
     }
 
 }
