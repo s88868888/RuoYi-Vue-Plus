@@ -154,20 +154,17 @@ public class BizBidSubmissionServiceImpl implements IBizBidSubmissionService {
         submission.setCompletedDocuments(0);
         submission.setFailedDocuments(0);
 
-        // 初始化竞争对手分析状态
-        submission.setCompetitorAnalysisStatus("none");
+        // 初始化竞争对手分析状态（若选择分析则设为 analyzing，实际异步触发由 Controller 在事务提交后执行）
+        if (Boolean.TRUE.equals(bo.getAnalyzeCompetitors())) {
+            submission.setCompetitorAnalysisStatus("analyzing");
+        } else {
+            submission.setCompetitorAnalysisStatus("none");
+        }
 
         submission.setRemark(bo.getRemark());
 
         // 6. 保存投标项目
         baseMapper.insert(submission);
-
-        // 7. 如果选择了分析竞争对手，触发异步分析
-        if (Boolean.TRUE.equals(bo.getAnalyzeCompetitors())) {
-            submission.setCompetitorAnalysisStatus("analyzing");
-            baseMapper.updateById(submission);
-            aiAnalysisService.analyzeCompetitorsAsync(submission.getId());
-        }
 
         return submission.getId();
     }

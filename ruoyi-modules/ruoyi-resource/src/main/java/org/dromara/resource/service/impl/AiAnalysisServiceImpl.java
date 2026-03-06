@@ -56,6 +56,7 @@ public class AiAnalysisServiceImpl implements IAiAnalysisService {
     private final BidDocumentVectorService bidDocumentVectorService;
     private final BizCompetitorMapper competitorMapper;
     private final BizBidSubmissionMapper bidSubmissionMapper;
+    private static final Pattern MATCH_SCORE_PATTERN = Pattern.compile("(?im)(?:score|总分|综合得分)\\s*[:：=]\\s*(\\d{1,3})");
 
     /**
      * 默认分析提示词
@@ -168,6 +169,80 @@ public class AiAnalysisServiceImpl implements IAiAnalysisService {
           2. 评分要客观公正，基于公司实际情况与招标要求的匹配度
           3. 优势劣势分析要具体，结合招标文件的具体要求
           4. 评估维度要全面，包括但不限于：业务范围、技术能力、资质证书、项目经验、人员配备、地域优势、财务实力
+        """;
+
+    private static final String MATCH_ANALYSIS_PROMPT_STRICT = """
+        你是专业的招投标契合度分析专家。请结合招标文件内容、招标项目信息以及候选公司资料，对每家公司做基于证据的逐项评分。
+
+        【招标项目信息】
+        项目名称：{projectName}
+        招标单位：{bidOrg}
+        项目类型：{projectType}
+        预算金额：{budgetAmount}元
+        项目地区：{projectRegion}
+        招标方式：{bidMethod}
+        项目描述：{projectDesc}
+
+        【待评估公司信息】
+        {companyInfoSection}
+
+        【评分规则】
+        1. 业务范围与项目类型匹配：0-25分
+        2. 资质证书与合规条件匹配：0-20分
+        3. 同类项目经验匹配：0-20分
+        4. 团队与人员配置匹配：0-15分
+        5. 区域履约与交付能力：0-10分
+        6. 财务、信誉与综合实力：0-10分
+        7. 总分 = 六项得分之和，范围必须为0-100分
+
+        【强约束】
+        1. 严禁沿用任何固定示例分数，尤其不要默认输出 85 分、72 分等模板分数
+        2. 必须根据当前招标项目的具体要求评分，不同项目的类型、区域、资质门槛、预算、经验要求不同，总分也应体现差异
+        3. 若某项缺少明确证据，按保守原则扣分，并说明“资料未体现”
+        4. 不要输出“公司A/公司B/示例”这类占位词，必须使用真实公司名称
+        5. 每家公司标题中必须包含 `score:分数` 格式，便于系统提取，例如 `（score:81）`
+
+        【输出要求】
+        请严格按以下 Markdown 结构输出：
+
+        # 契合度分析报告
+
+        ## 项目关键要求
+        - 门槛条件：...
+        - 关键加分项：...
+        - 主要风险点：...
+
+        ## 综合评分汇总
+        | 公司名称 | 业务范围(25) | 资质证书(20) | 项目经验(20) | 团队人员(15) | 区域履约(10) | 财务信誉(10) | score:总分 | 推荐等级 |
+        |---|---:|---:|---:|---:|---:|---:|---:|---|
+        | 真实公司名称 | [0-25] | [0-20] | [0-20] | [0-15] | [0-10] | [0-10] | score:[0-100] | 高/中/低 |
+
+        ## [真实公司名称]（score:[0-100]）
+        ### 1. 评分依据
+        - 结合招标文件与公司资料，说明主要命中点与扣分点
+
+        ### 2. 优势分析
+        - ...
+
+        ### 3. 短板与风险
+        - ...
+
+        ### 4. 分项评分明细
+        | 评估维度 | 分值上限 | 实得分 | 扣分原因/证据 |
+        |---|---:|---:|---|
+        | 业务范围与项目类型匹配 | 25 | [0-25] | ... |
+        | 资质证书与合规条件匹配 | 20 | [0-20] | ... |
+        | 同类项目经验匹配 | 20 | [0-20] | ... |
+        | 团队与人员配置匹配 | 15 | [0-15] | ... |
+        | 区域履约与交付能力 | 10 | [0-10] | ... |
+        | 财务、信誉与综合实力 | 10 | [0-10] | ... |
+        | 总分 | 100 | [0-100] | 六项加总 |
+
+        ### 5. 投标建议
+        - ...
+
+        ## 最终建议
+        - 对所有公司进行横向比较后，给出推荐顺序与理由
         """;
 
     @Override
@@ -409,7 +484,7 @@ public class AiAnalysisServiceImpl implements IAiAnalysisService {
      * 构建契合度分析提示词
      */
     private String buildMatchAnalysisPrompt(BizBidProject project, String customPrompt) {
-        String template = StrUtil.isNotBlank(customPrompt) ? customPrompt : MATCH_ANALYSIS_PROMPT;
+        String template = StrUtil.isNotBlank(customPrompt) ? customPrompt : MATCH_ANALYSIS_PROMPT_STRICT;
         return template
             .replace("{projectName}", StrUtil.nullToEmpty(project.getProjectName()))
             .replace("{bidOrg}", StrUtil.nullToEmpty(project.getBidOrg()))
@@ -566,9 +641,8 @@ public class AiAnalysisServiceImpl implements IAiAnalysisService {
             return null;
         }
 
-        // 匹配所有 score:XX 格式（标题中、表格中）
-        Pattern scorePattern = Pattern.compile("score\\s*[:：]\\s*(\\d{1,3})");
-        Matcher matcher = scorePattern.matcher(text);
+        // 匹配所有总分标记，兼容 score/总分/综合得分
+        Matcher matcher = MATCH_SCORE_PATTERN.matcher(text);
 
         Integer bestScore = null;
         while (matcher.find()) {
@@ -592,16 +666,9 @@ public class AiAnalysisServiceImpl implements IAiAnalysisService {
             return null;
         }
 
-        Pattern scorePattern = Pattern.compile("(?i)score\\s*[:：]\\s*(\\d{1,3})");
-        Matcher scoreMatcher = scorePattern.matcher(text);
+        Matcher scoreMatcher = MATCH_SCORE_PATTERN.matcher(text);
         if (scoreMatcher.find()) {
             return normalizeScore(scoreMatcher.group(1));
-        }
-
-        Pattern firstNumberPattern = Pattern.compile("\\b(\\d{1,3})\\b");
-        Matcher firstNumberMatcher = firstNumberPattern.matcher(text);
-        if (firstNumberMatcher.find()) {
-            return normalizeScore(firstNumberMatcher.group(1));
         }
         return null;
     }
@@ -655,6 +722,76 @@ public class AiAnalysisServiceImpl implements IAiAnalysisService {
         请在报告开头给出总体竞争力评分：score:XX（0-100分）
         """;
 
+    private static final String COMPETITOR_ANALYSIS_PROMPT_STRICT = """
+        你是专业的招投标竞争对手分析专家。请结合招标项目、我方公司资料与竞争对手资料，输出一份基于证据的竞争态势分析报告。
+
+        【招标项目信息】
+        项目名称：{projectName}
+        招标单位：{bidOrg}
+        项目类型：{projectType}
+        预算金额：{budgetAmount}元
+        项目区域：{projectRegion}
+        招标方式：{bidMethod}
+        项目描述：{projectDesc}
+
+        【我方公司信息】
+        {companyInfoSection}
+
+        【竞争对手信息】
+        {competitorSection}
+
+        【总体竞争力评分规则】
+        1. 资质与合规竞争力：0-20分
+        2. 同类项目业绩竞争力：0-20分
+        3. 技术与方案竞争力：0-20分
+        4. 团队与资源保障能力：0-15分
+        5. 商务报价与成本竞争力：0-15分
+        6. 区域履约与客户关系优势：0-10分
+        7. 总分 = 六项加总，范围必须为0-100分
+
+        【强约束】
+        1. 报告全文只能出现一次 `score:` 标记，且必须放在开头的“总体竞争力评分”行
+        2. 严禁默认输出固定模板分数，例如 85、88、90 等
+        3. 分项评分明细中不要写 `score:`，只写纯数字
+        4. 若缺少明确证据，按保守原则扣分，并说明“资料未体现”
+        5. 结论必须体现当前项目特征，不同项目的总分应允许明显差异
+
+        【输出结构】
+        # 竞争对手分析报告
+
+        ## 总体竞争力评分
+        score:[0-100]
+
+        ## 评分摘要
+        | 维度 | 分值上限 | 实得分 | 评分依据 |
+        |---|---:|---:|---|
+        | 资质与合规竞争力 | 20 | [0-20] | ... |
+        | 同类项目业绩竞争力 | 20 | [0-20] | ... |
+        | 技术与方案竞争力 | 20 | [0-20] | ... |
+        | 团队与资源保障能力 | 15 | [0-15] | ... |
+        | 商务报价与成本竞争力 | 15 | [0-15] | ... |
+        | 区域履约与客户关系优势 | 10 | [0-10] | ... |
+        | 总分 | 100 | [0-100] | 六项加总 |
+
+        ## 竞争态势总览
+        - ...
+
+        ## 逐一竞争对手分析
+        - 分别分析每个竞争对手的优势、弱点、中标可能性
+
+        ## 我方竞争力评估
+        - 说明我方在本项目中的优势与短板
+
+        ## 对比分析表
+        - 从资质、业绩、技术、报价、区域优势等维度横向比较
+
+        ## 投标策略建议
+        - ...
+
+        ## 风险提示
+        - ...
+        """;
+
     @Override
     public String analyzeCompetitors(Long submissionId, String prompt) {
         BizBidSubmission submission = bidSubmissionMapper.selectById(submissionId);
@@ -683,7 +820,7 @@ public class AiAnalysisServiceImpl implements IAiAnalysisService {
             String competitorSection = buildCompetitorSection(tenantId);
 
             // 3. 构建提示词
-            String template = StrUtil.isNotBlank(prompt) ? prompt : COMPETITOR_ANALYSIS_PROMPT;
+            String template = StrUtil.isNotBlank(prompt) ? prompt : COMPETITOR_ANALYSIS_PROMPT_STRICT;
             String finalPrompt = template
                 .replace("{projectName}", StrUtil.nullToEmpty(submission.getProjectName()))
                 .replace("{bidOrg}", StrUtil.nullToEmpty(submission.getBidOrg()))
@@ -700,7 +837,7 @@ public class AiAnalysisServiceImpl implements IAiAnalysisService {
             String result = chatWithAttachments(attachments, finalPrompt);
 
             // 5. 解析竞争力评分
-            Integer score = parseBestMatchScore(result);
+            Integer score = parseMatchScore(result);
 
             // 6. 更新投标项目
             LambdaUpdateWrapper<BizBidSubmission> wrapper = new LambdaUpdateWrapper<BizBidSubmission>()
@@ -725,21 +862,29 @@ public class AiAnalysisServiceImpl implements IAiAnalysisService {
 
     @Async
     @Override
-    public void analyzeCompetitorsAsync(Long submissionId) {
+    public void analyzeCompetitorsAsync(Long submissionId, String prompt) {
         TenantHelper.ignore(() -> {
             BizBidSubmission submission = bidSubmissionMapper.selectById(submissionId);
             if (submission == null) {
-                log.error("投标项目不存在：{}", submissionId);
+                log.error("竞争对手分析：投标项目不存在，submissionId={}", submissionId);
                 return;
             }
             bidSubmissionMapper.update(new LambdaUpdateWrapper<BizBidSubmission>()
                 .eq(BizBidSubmission::getId, submissionId)
                 .set(BizBidSubmission::getCompetitorAnalysisStatus, "analyzing"));
             try {
-                analyzeCompetitors(submissionId, null);
+                analyzeCompetitors(submissionId, prompt);
                 log.info("投标项目{}竞争对手分析完成", submissionId);
             } catch (Exception e) {
-                log.error("异步竞争对手分析失败", e);
+                log.error("异步竞争对手分析失败, submissionId={}", submissionId, e);
+                try {
+                    bidSubmissionMapper.update(new LambdaUpdateWrapper<BizBidSubmission>()
+                        .eq(BizBidSubmission::getId, submissionId)
+                        .set(BizBidSubmission::getCompetitorAnalysisStatus, "failed")
+                        .set(BizBidSubmission::getCompetitorAnalysisResult, "分析失败：" + e.getMessage()));
+                } catch (Exception ex) {
+                    log.error("兜底更新分析状态失败, submissionId={}", submissionId, ex);
+                }
             }
         });
     }

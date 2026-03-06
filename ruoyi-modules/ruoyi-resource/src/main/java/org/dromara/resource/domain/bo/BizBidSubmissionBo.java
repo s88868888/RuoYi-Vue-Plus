@@ -136,4 +136,9 @@ public class BizBidSubmissionBo extends BaseEntity {
      */
     private Boolean analyzeCompetitors;
 
+    /**
+     * 竞争对手分析自定义提示词（创建时传参，不持久化）
+     */
+    private String competitorAnalysisPrompt;
+
 }

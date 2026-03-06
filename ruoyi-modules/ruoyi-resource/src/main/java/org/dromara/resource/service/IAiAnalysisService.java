@@ -71,7 +71,8 @@ public interface IAiAnalysisService {
      * 异步竞争对手分析
      *
      * @param submissionId 投标项目ID
+     * @param prompt 自定义提示词（可选，为空则使用默认模板）
      */
-    void analyzeCompetitorsAsync(Long submissionId);
+    void analyzeCompetitorsAsync(Long submissionId, String prompt);
 
 }

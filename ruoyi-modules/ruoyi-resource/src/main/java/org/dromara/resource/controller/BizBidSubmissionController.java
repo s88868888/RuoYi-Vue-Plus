@@ -109,6 +109,10 @@ public class BizBidSubmissionController extends BaseController {
         @NotNull(message = "招标项目ID不能为空") @PathVariable Long bidProjectId,
         @Validated(AddGroup.class) @RequestBody BizBidSubmissionBo bo) {
         Long submissionId = bizBidSubmissionService.createFromBidProject(bidProjectId, bo);
+        // 事务已提交，此时触发异步竞争对手分析（避免事务未提交时异步线程查不到数据）
+        if (Boolean.TRUE.equals(bo.getAnalyzeCompetitors())) {
+            aiAnalysisService.analyzeCompetitorsAsync(submissionId, bo.getCompetitorAnalysisPrompt());
+        }
         return R.ok(submissionId);
     }
 
@@ -238,13 +242,16 @@ public class BizBidSubmissionController extends BaseController {
      * 手动触发竞争对手分析
      *
      * @param id 投标项目ID
+     * @param bo 请求体（可选包含 prompt 字段）
      */
     @SaCheckPermission("bid:submission:edit")
     @Log(title = "投标项目", businessType = BusinessType.UPDATE)
     @RepeatSubmit()
     @PostMapping("/{id}/analyzeCompetitors")
-    public R<Void> analyzeCompetitors(@NotNull(message = "主键不能为空") @PathVariable Long id) {
-        aiAnalysisService.analyzeCompetitorsAsync(id);
+    public R<Void> analyzeCompetitors(@NotNull(message = "主键不能为空") @PathVariable Long id,
+                                       @RequestBody(required = false) java.util.Map<String, String> body) {
+        String prompt = (body != null) ? body.get("prompt") : null;
+        aiAnalysisService.analyzeCompetitorsAsync(id, prompt);
         return R.ok();
     }
 
