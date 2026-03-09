@@ -220,6 +220,8 @@ xss:
   # 排除链接
   excludeUrls:
     - /system/notice
+    - /bid/submission/chapter
+    - /bid/submission/chapter/**
 
 --- # 分布式锁 lock4j 全局配置
 lock4j:
