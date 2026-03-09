@@ -187,19 +187,14 @@ public class BizSubmissionChapterServiceImpl implements IBizSubmissionChapterSer
             String prompt;
 
             if (isTemplateChapter) {
-                // template 章节：从 Milvus 检索模板内容，使用 chatGenerate
-                SseMessageUtils.sendMessage(userId, buildChapterSseMessage("chapter_start", chapterId, "正在从知识库检索模板内容...", 20));
-                List<VectorSearchResult> templateKnowledge = retrieveTemplateKnowledge(tenantId, project.getId(), chapter.getChapterTitle());
-                prompt = buildTemplateExtractPrompt(chapter, project, templateKnowledge);
-                SseMessageUtils.sendMessage(userId, buildChapterSseMessage("chapter_start", chapterId, "正在还原招标文件规定格式...", 40));
-                content = aiChatService.chatGenerate(prompt);
+                // template 章节：填充项目信息和公司信息占位符
+                SseMessageUtils.sendMessage(userId, buildChapterSseMessage("chapter_start", chapterId, "正在填充模板占位符...", 40));
+                content = fillTemplateContent(chapter, submission, project, companyId);
 
-                // 提取失败时自动降级为 AI 生成
-                if (StrUtil.isBlank(content) || isEffectivelyEmpty(content)) {
-                    log.warn("模板提取为空，自动降级为AI生成，chapterId: {}, title: {}", chapterId, chapter.getChapterTitle());
-                    chapter.setChapterType("generate");
-                    baseMapper.updateById(chapter);
-                    SseMessageUtils.sendMessage(userId, buildChapterSseMessage("chapter_start", chapterId, "未提取到规定格式，改为AI生成...", 50));
+                // 如果模板内容为空，降级为AI生成（保留章节类型不变）
+                if (StrUtil.isBlank(content)) {
+                    log.warn("模板内容为空，降级为AI生成（保留章节类型不变），chapterId: {}, title: {}", chapterId, chapter.getChapterTitle());
+                    SseMessageUtils.sendMessage(userId, buildChapterSseMessage("chapter_start", chapterId, "模板为空，改为AI生成...", 50));
                     ChapterKnowledge knowledge = retrieveKnowledgeForChapter(tenantId, project.getId(), companyId, chapter.getChapterTitle());
                     prompt = buildChapterContentPrompt(chapter, project, documentType, knowledge);
                     content = aiChatService.chatGenerate(prompt);
@@ -215,6 +210,11 @@ public class BizSubmissionChapterServiceImpl implements IBizSubmissionChapterSer
 
             // 6. 解析图片占位符，替换为实际图片
             content = imageRetrievalAgent.resolveImagePlaceholders(content, companyId);
+
+            // 6.5. 如果是template类型章节，将招标文件的图片附件添加到文章末尾
+            if (isTemplateChapter && project.getAttachments() != null && !project.getAttachments().isBlank()) {
+                content = appendProjectAttachments(content, project);
+            }
 
             // 7. 保存内容，更新状态
             Date endTime = new Date();
@@ -332,16 +332,20 @@ public class BizSubmissionChapterServiceImpl implements IBizSubmissionChapterSer
                     String content;
 
                     if (isTemplateChapter) {
-                        // template 章节：从 Milvus 检索模板内容
-                        List<VectorSearchResult> templateKnowledge = retrieveTemplateKnowledge(
-                            tenantId, project.getId(), chapter.getChapterTitle());
-                        prompt = buildTemplateExtractPrompt(chapter, project, templateKnowledge);
-                        content = callGenerateWithRetry(prompt, userId, chapter.getChapterTitle());
+                        // template 章节：先尝试 fillTemplateContent 填充模板
+                        content = fillTemplateContent(chapter, submission, project, companyId);
+
+                        if (StrUtil.isBlank(content)) {
+                            // fillTemplateContent 为空，尝试从 Milvus 检索模板内容
+                            List<VectorSearchResult> templateKnowledge = retrieveTemplateKnowledge(
+                                tenantId, project.getId(), chapter.getChapterTitle());
+                            prompt = buildTemplateExtractPrompt(chapter, project, templateKnowledge);
+                            content = callGenerateWithRetry(prompt, userId, chapter.getChapterTitle());
+                        }
 
                         if (StrUtil.isBlank(content) || isEffectivelyEmpty(content)) {
-                            log.warn("批量生成中模板提取为空，自动降级为AI生成，chapterId: {}, title: {}", chapter.getId(), chapter.getChapterTitle());
-                            chapter.setChapterType("generate");
-                            baseMapper.updateById(chapter);
+                            // 都为空，降级为AI生成（保留章节类型不变）
+                            log.warn("批量生成中模板内容为空，降级为AI生成（保留章节类型不变），chapterId: {}, title: {}", chapter.getId(), chapter.getChapterTitle());
                             ChapterKnowledge knowledge = retrieveKnowledgeForChapter(
                                 tenantId, project.getId(), companyId, chapter.getChapterTitle());
                             prompt = buildChapterContentPrompt(chapter, project, documentType, knowledge);
@@ -357,6 +361,11 @@ public class BizSubmissionChapterServiceImpl implements IBizSubmissionChapterSer
 
                     // 解析图片占位符，替换为实际图片
                     content = imageRetrievalAgent.resolveImagePlaceholders(content, companyId);
+
+                    // 如果是template类型章节，将招标文件的图片附件添加到文章末尾
+                    if (isTemplateChapter && project.getAttachments() != null && !project.getAttachments().isBlank()) {
+                        content = appendProjectAttachments(content, project);
+                    }
 
                     // 保存内容
                     Date endTime = new Date();
@@ -503,6 +512,62 @@ public class BizSubmissionChapterServiceImpl implements IBizSubmissionChapterSer
             }
         }
         throw new RuntimeException("AI 生成调用重试次数耗尽");
+    }
+
+    /**
+     * 填充模板内容（支持项目信息占位符）
+     */
+    private String fillTemplateContent(BizSubmissionChapter chapter, BizBidSubmission submission,
+                                       BizBidProject project, Long companyId) {
+        String templateSource = chapter.getTemplateSource();
+        if (StrUtil.isBlank(templateSource)) {
+            return "";
+        }
+
+        String content = templateSource;
+
+        // 填充项目信息占位符（括号格式）
+        if (project != null) {
+            content = content.replace("(项目名称)", project.getProjectName() != null ? project.getProjectName() : "");
+            content = content.replace("(招标单位)", project.getBidOrg() != null ? project.getBidOrg() : "");
+            content = content.replace("(项目预算)", project.getBudgetAmount() != null ? project.getBudgetAmount().toString() : "");
+            content = content.replace("(项目地区)", project.getProjectRegion() != null ? project.getProjectRegion() : "");
+        }
+
+        return content;
+    }
+
+    /**
+     * 将招标文件的图片附件添加到文章末尾（仅用于template类型章节）
+     */
+    private String appendProjectAttachments(String content, BizBidProject project) {
+        if (StrUtil.isBlank(content) || project == null || StrUtil.isBlank(project.getAttachments())) {
+            return content;
+        }
+
+        StringBuilder sb = new StringBuilder(content);
+        String[] attachmentIds = project.getAttachments().split(",");
+
+        for (String ossIdStr : attachmentIds) {
+            try {
+                Long ossId = Long.parseLong(ossIdStr.trim());
+                SysOss oss = sysOssMapper.selectById(ossId);
+                if (oss != null && oss.getUrl() != null) {
+                    String fileSuffix = oss.getFileSuffix() != null ? oss.getFileSuffix().toLowerCase() : "";
+                    if (fileSuffix.matches("jpg|jpeg|png|gif|bmp|webp")) {
+                        sb.append("<div style=\"text-align:center;margin-top:20px;\">");
+                        sb.append("<img src=\"").append(oss.getUrl()).append("\" ");
+                        sb.append("alt=\"").append(oss.getOriginalName() != null ? oss.getOriginalName() : "附件图片").append("\" ");
+                        sb.append("style=\"max-width:80%;border:1px solid #eee;border-radius:4px;\" />");
+                        sb.append("</div>");
+                    }
+                }
+            } catch (NumberFormatException e) {
+                log.warn("解析附件ID失败: {}", ossIdStr);
+            }
+        }
+
+        return sb.toString();
     }
 
     /**

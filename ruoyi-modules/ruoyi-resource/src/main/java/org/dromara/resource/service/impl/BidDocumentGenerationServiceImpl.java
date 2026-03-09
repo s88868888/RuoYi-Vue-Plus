@@ -278,7 +278,7 @@ public class BidDocumentGenerationServiceImpl implements IBidDocumentGenerationS
                     chapterMapper.updateById(chapter);
 
                     if ("template".equals(chapter.getChapterType())) {
-                        fillTemplateChapter(chapter, config.getCompanyId());
+                        fillTemplateChapter(chapter, submission, config.getCompanyId());
                     } else {
                         generateAiChapter(chapter, submission, config);
                     }
@@ -336,35 +336,41 @@ public class BidDocumentGenerationServiceImpl implements IBidDocumentGenerationS
     }
 
     /**
-     * 填充模板章节（从 Milvus 检索公司信息替换占位符）
+     * 填充模板章节（支持项目信息和公司信息占位符）
      */
-    private void fillTemplateChapter(BizSubmissionChapter chapter, Long companyId) {
+    private void fillTemplateChapter(BizSubmissionChapter chapter, BizBidSubmission submission, Long companyId) {
         String templateSource = chapter.getTemplateSource();
         if (templateSource == null || templateSource.isBlank()) {
             chapter.setChapterContent("");
             return;
         }
 
-        String placeholdersJson = chapter.getTemplatePlaceholders();
-        if (placeholdersJson == null || placeholdersJson.isBlank()) {
-            chapter.setChapterContent(templateSource);
-            return;
-        }
-
         try {
-            List<String> placeholders = JSON.parseArray(placeholdersJson, String.class);
-            if (placeholders.isEmpty()) {
-                chapter.setChapterContent(templateSource);
-                return;
+            String content = templateSource;
+
+            // 1. 填充项目信息占位符（括号格式）
+            BizBidProject project = bidProjectMapper.selectById(submission.getBidProjectId());
+            if (project != null) {
+                content = content.replace("(项目名称)", project.getProjectName() != null ? project.getProjectName() : "");
+                content = content.replace("(招标单位)", project.getBidOrg() != null ? project.getBidOrg() : "");
+                content = content.replace("(项目预算)", project.getBudgetAmount() != null ? project.getBudgetAmount().toString() : "");
+                content = content.replace("(项目地区)", project.getProjectRegion() != null ? project.getProjectRegion() : "");
             }
 
-            Map<String, String> values = companyInfoRetrievalAgent.retrieveCompanyInfo(companyId, placeholders);
-            String content = templateSource;
-            for (Map.Entry<String, String> entry : values.entrySet()) {
-                if (entry.getValue() != null && !entry.getValue().isBlank()) {
-                    content = content.replace(entry.getKey(), entry.getValue());
+            // 2. 填充公司信息占位符（如果有）
+            String placeholdersJson = chapter.getTemplatePlaceholders();
+            if (placeholdersJson != null && !placeholdersJson.isBlank()) {
+                List<String> placeholders = JSON.parseArray(placeholdersJson, String.class);
+                if (!placeholders.isEmpty()) {
+                    Map<String, String> values = companyInfoRetrievalAgent.retrieveCompanyInfo(companyId, placeholders);
+                    for (Map.Entry<String, String> entry : values.entrySet()) {
+                        if (entry.getValue() != null && !entry.getValue().isBlank()) {
+                            content = content.replace(entry.getKey(), entry.getValue());
+                        }
+                    }
                 }
             }
+
             chapter.setChapterContent(content);
         } catch (Exception e) {
             log.warn("填充模板章节失败，使用原始模板: {}", e.getMessage());

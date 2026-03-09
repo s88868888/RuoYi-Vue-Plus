@@ -10,16 +10,20 @@ import lombok.extern.slf4j.Slf4j;
 import org.apache.poi.xwpf.usermodel.*;
 import org.dromara.common.core.exception.ServiceException;
 import org.dromara.common.core.utils.file.FileUtils;
+import org.dromara.resource.domain.BizBidProject;
+import org.dromara.resource.domain.BizBidSubmission;
 import org.dromara.resource.domain.BizDocumentConfig;
 import org.dromara.resource.domain.BizSubmissionChapter;
 import org.dromara.resource.domain.BizSubmissionDocument;
 import org.dromara.resource.domain.vo.BizSubmissionDocumentVo;
+import org.dromara.resource.mapper.BizBidProjectMapper;
+import org.dromara.resource.mapper.BizBidSubmissionMapper;
 import org.dromara.resource.mapper.BizDocumentConfigMapper;
 import org.dromara.resource.mapper.BizSubmissionChapterMapper;
 import org.dromara.resource.mapper.BizSubmissionDocumentMapper;
 import org.dromara.resource.service.IBizSubmissionDocumentService;
-import org.dromara.resource.domain.BizBidSubmission;
-import org.dromara.resource.mapper.BizBidSubmissionMapper;
+import org.dromara.system.domain.vo.SysOssVo;
+import org.dromara.system.service.ISysOssService;
 import org.springframework.http.MediaType;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
@@ -50,6 +54,8 @@ public class BizSubmissionDocumentServiceImpl implements IBizSubmissionDocumentS
     private final BizSubmissionChapterMapper chapterMapper;
     private final BizDocumentConfigMapper documentConfigMapper;
     private final BizBidSubmissionMapper submissionMapper;
+    private final BizBidProjectMapper bidProjectMapper;
+    private final ISysOssService sysOssService;
 
     @Override
     public List<BizSubmissionDocumentVo> listLatestBySubmissionId(Long submissionId) {
@@ -103,6 +109,13 @@ public class BizSubmissionDocumentServiceImpl implements IBizSubmissionDocumentS
             List<BizSubmissionChapter> sorted = buildTreeOrder(docChapters);
             sb.append(buildMarkdownContent(sorted));
         }
+
+        // 添加附件信息到内容末尾
+        String attachmentText = buildAttachmentText(submissionId);
+        if (StrUtil.isNotBlank(attachmentText)) {
+            sb.append("\n\n").append(attachmentText);
+        }
+
         String markdownContent = sb.toString();
 
         // 3. 查询当前最大版本号（整本合并文档，documentConfigId 为空）
@@ -160,6 +173,12 @@ public class BizSubmissionDocumentServiceImpl implements IBizSubmissionDocumentS
         // 按树形层级排序后构建 Markdown
         List<BizSubmissionChapter> sorted = buildTreeOrder(chapters);
         String markdownContent = buildMarkdownContent(sorted);
+
+        // 添加附件信息到内容末尾
+        String attachmentText = buildAttachmentText(submissionId);
+        if (StrUtil.isNotBlank(attachmentText)) {
+            markdownContent += "\n\n" + attachmentText;
+        }
 
         // 3. 查询当前最大版本号
         List<BizSubmissionDocumentVo> existingVersions = baseMapper.selectVersionsByConfigId(documentConfigId);
@@ -472,6 +491,39 @@ public class BizSubmissionDocumentServiceImpl implements IBizSubmissionDocumentS
         FileUtils.setAttachmentResponseHeader(response, docName + ".docx");
         document.write(response.getOutputStream());
         document.close();
+    }
+
+    /**
+     * 构建附件文本信息
+     */
+    private String buildAttachmentText(Long submissionId) {
+        if (submissionId == null) return "";
+
+        BizBidSubmission submission = submissionMapper.selectById(submissionId);
+        if (submission == null || submission.getBidProjectId() == null) return "";
+
+        BizBidProject project = bidProjectMapper.selectById(submission.getBidProjectId());
+        if (project == null || StrUtil.isBlank(project.getAttachments())) return "";
+
+        String[] ossIdArr = project.getAttachments().split(",");
+        List<Long> ossIds = new ArrayList<>();
+        for (String ossIdStr : ossIdArr) {
+            try {
+                ossIds.add(Long.parseLong(ossIdStr.trim()));
+            } catch (NumberFormatException ignored) {}
+        }
+        if (ossIds.isEmpty()) return "";
+
+        List<SysOssVo> ossList = sysOssService.listByIds(ossIds);
+        if (ossList.isEmpty()) return "";
+
+        StringBuilder sb = new StringBuilder();
+        sb.append("**附件：**\n\n");
+        for (int i = 0; i < ossList.size(); i++) {
+            SysOssVo oss = ossList.get(i);
+            sb.append((i + 1)).append(". ").append(oss.getOriginalName()).append("\n");
+        }
+        return sb.toString();
     }
 
     /**
