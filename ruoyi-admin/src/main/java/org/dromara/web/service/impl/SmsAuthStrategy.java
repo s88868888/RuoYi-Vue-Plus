@@ -50,9 +50,18 @@ public class SmsAuthStrategy implements IAuthStrategy {
         String tenantId = loginBody.getTenantId();
         String phonenumber = loginBody.getPhonenumber();
         String smsCode = loginBody.getSmsCode();
-        LoginUser loginUser = TenantHelper.dynamic(tenantId, () -> {
+
+        // 如果未传tenantId, 则忽略租户过滤根据手机号查出所属租户
+        if (StringUtils.isBlank(tenantId)) {
+            SysUserVo user = TenantHelper.ignore(() -> loadUserByPhonenumber(phonenumber));
+            tenantId = user.getTenantId();
+            loginService.checkTenant(tenantId);
+        }
+
+        String finalTenantId = tenantId;
+        LoginUser loginUser = TenantHelper.dynamic(finalTenantId, () -> {
             SysUserVo user = loadUserByPhonenumber(phonenumber);
-            loginService.checkLogin(LoginType.SMS, tenantId, user.getUserName(), () -> !validateSmsCode(tenantId, phonenumber, smsCode));
+            loginService.checkLogin(LoginType.SMS, finalTenantId, user.getUserName(), () -> !validateSmsCode(finalTenantId, phonenumber, smsCode));
             // 此处可根据登录用户的数据不同 自行创建 loginUser 属性不够用继承扩展就行了
             return loginService.buildLoginUser(user);
         });

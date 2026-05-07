@@ -99,8 +99,10 @@ public class AuthController {
         } else if (!SystemConstants.NORMAL.equals(client.getStatus())) {
             return R.fail(MessageUtils.message("auth.grant.type.blocked"));
         }
-        // 校验租户
-        loginService.checkTenant(loginBody.getTenantId());
+        // 校验租户(如果前端传了tenantId则校验, 未传则由策略内部自动获取)
+        if (StringUtils.isNotBlank(loginBody.getTenantId())) {
+            loginService.checkTenant(loginBody.getTenantId());
+        }
         // 登录
         LoginVo loginVo = IAuthStrategy.login(body, client, grantType);
 

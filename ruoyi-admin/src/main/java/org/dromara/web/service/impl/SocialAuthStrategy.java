@@ -72,11 +72,15 @@ public class SocialAuthStrategy implements IAuthStrategy {
         }
         SysSocialVo social;
         if (TenantHelper.isEnable()) {
-            Optional<SysSocialVo> opt = StreamUtils.findAny(list, x -> x.getTenantId().equals(loginBody.getTenantId()));
-            if (opt.isEmpty()) {
-                throw new ServiceException("对不起，你没有权限登录当前租户！");
+            if (list.size() > 1 && org.dromara.common.core.utils.StringUtils.isNotBlank(loginBody.getTenantId())) {
+                Optional<SysSocialVo> opt = StreamUtils.findAny(list, x -> x.getTenantId().equals(loginBody.getTenantId()));
+                if (opt.isEmpty()) {
+                    throw new ServiceException("对不起，你没有权限登录当前租户！");
+                }
+                social = opt.get();
+            } else {
+                social = list.get(0);
             }
-            social = opt.get();
         } else {
             social = list.get(0);
         }

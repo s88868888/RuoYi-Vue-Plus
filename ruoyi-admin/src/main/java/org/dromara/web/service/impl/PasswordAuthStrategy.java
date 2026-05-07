@@ -57,14 +57,22 @@ public class PasswordAuthStrategy implements IAuthStrategy {
         String code = loginBody.getCode();
         String uuid = loginBody.getUuid();
 
+        // 如果未传tenantId, 则忽略租户过滤根据用户名查出所属租户
+        if (StringUtils.isBlank(tenantId)) {
+            SysUserVo user = TenantHelper.ignore(() -> loadUserByUsername(username));
+            tenantId = user.getTenantId();
+            loginService.checkTenant(tenantId);
+        }
+
         boolean captchaEnabled = captchaProperties.getEnable();
+        String finalTenantId = tenantId;
         // 验证码开关
         if (captchaEnabled) {
-            validateCaptcha(tenantId, username, code, uuid);
+            validateCaptcha(finalTenantId, username, code, uuid);
         }
-        LoginUser loginUser = TenantHelper.dynamic(tenantId, () -> {
+        LoginUser loginUser = TenantHelper.dynamic(finalTenantId, () -> {
             SysUserVo user = loadUserByUsername(username);
-            loginService.checkLogin(LoginType.PASSWORD, tenantId, username, () -> !BCrypt.checkpw(password, user.getPassword()));
+            loginService.checkLogin(LoginType.PASSWORD, finalTenantId, username, () -> !BCrypt.checkpw(password, user.getPassword()));
             // 此处可根据登录用户的数据不同 自行创建 loginUser
             return loginService.buildLoginUser(user);
         });
