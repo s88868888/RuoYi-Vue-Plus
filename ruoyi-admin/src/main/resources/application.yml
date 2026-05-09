@@ -136,6 +136,9 @@ tenant:
     - sys_client
     - sys_oss_config
     - flow_spel
+    - review_standard_knowledge
+    - review_task_standard
+    - review_doc_paragraph
 
 # MyBatisPlus配置
 # https://baomidou.com/config/
@@ -259,7 +262,7 @@ websocket:
 --- # warm-flow工作流配置
 warm-flow:
   # 是否开启工作流，默认true
-  enabled: false
+  enabled: true
   # 是否开启设计器ui
   ui: true
   # 是否显示流程图顶部文字

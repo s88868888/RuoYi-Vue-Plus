@@ -364,6 +364,13 @@
                 <version>${revision}</version>
             </dependency>
 
+            <!-- 智能审核模块 -->
+            <dependency>
+                <groupId>org.dromara</groupId>
+                <artifactId>ruoyi-review</artifactId>
+                <version>${revision}</version>
+            </dependency>
+
         </dependencies>
     </dependencyManagement>
 

@@ -14,6 +14,10 @@ import org.springframework.core.io.Resource;
 import org.springframework.core.io.UrlResource;
 import org.springframework.stereotype.Service;
 
+import org.springframework.util.MimeTypeUtils;
+
+import java.net.MalformedURLException;
+import java.net.URI;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Locale;
@@ -92,12 +96,20 @@ public class AiChatService {
         .build();
 
     private static final DashScopeChatOptions GENERATE_OPTIONS = DashScopeChatOptions.builder()
-        .withModel("qwen3.5-plus")
+        .withModel("qwen3.6-plus")
         .withMultiModel(true)
         .withStream(true)
         .withIncrementalOutput(true)
         .withTemperature(0.3)
         .withTopP(0.9)
+        .build();
+
+    private static final DashScopeChatOptions VISION_OPTIONS = DashScopeChatOptions.builder()
+        .withModel("qwen3-vl-plus")
+        .withMultiModel(true)
+        .withTemperature(0.1)
+        .withTopP(0.8)
+        .withMaxToken(4096)
         .build();
 
     private static final DashScopeChatOptions DOC_OPTIONS = DashScopeChatOptions.builder()
@@ -231,6 +243,72 @@ public class AiChatService {
             results.add(embeddingModel.embed(text));
         }
         return results;
+    }
+
+    /**
+     * 图片理解分析（qwen3-vl-plus）
+     *
+     * @param imageUrl 图片URL
+     * @param prompt   分析提示词
+     * @return AI 回复
+     */
+    public String chatWithImage(String imageUrl, String prompt) {
+        try {
+            return callWithRetry(() -> {
+                try {
+                    return multiModalChatClient.prompt()
+                        .user(u -> {
+                            try {
+                                u.text(prompt).media(MimeTypeUtils.IMAGE_PNG, URI.create(imageUrl).toURL());
+                            } catch (MalformedURLException e) {
+                                throw new RuntimeException("图片URL格式错误: " + imageUrl, e);
+                            }
+                        })
+                        .options(VISION_OPTIONS)
+                        .call()
+                        .content();
+                } catch (Exception e) {
+                    throw e;
+                }
+            });
+        } catch (Exception e) {
+            log.error("[chatWithImage] 图片分析失败, imageUrl={}", imageUrl, e);
+            throw e;
+        }
+    }
+
+    /**
+     * 带系统提示词的图片理解分析（qwen3-vl-plus）
+     *
+     * @param systemPrompt 系统提示词
+     * @param imageUrl     图片URL
+     * @param userPrompt   用户提示词
+     * @return AI 回复
+     */
+    public String chatWithImage(String systemPrompt, String imageUrl, String userPrompt) {
+        try {
+            return callWithRetry(() -> {
+                try {
+                    return multiModalChatClient.prompt()
+                        .system(systemPrompt)
+                        .user(u -> {
+                            try {
+                                u.text(userPrompt).media(MimeTypeUtils.IMAGE_PNG, URI.create(imageUrl).toURL());
+                            } catch (MalformedURLException e) {
+                                throw new RuntimeException("图片URL格式错误: " + imageUrl, e);
+                            }
+                        })
+                        .options(VISION_OPTIONS)
+                        .call()
+                        .content();
+                } catch (Exception e) {
+                    throw e;
+                }
+            });
+        } catch (Exception e) {
+            log.error("[chatWithImage] 带系统提示词的图片分析失败, imageUrl={}", imageUrl, e);
+            throw e;
+        }
     }
 
     /**

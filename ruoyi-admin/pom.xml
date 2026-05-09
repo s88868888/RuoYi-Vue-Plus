@@ -95,6 +95,12 @@
             <artifactId>ruoyi-resource</artifactId>
         </dependency>
 
+        <!-- 智能审核模块 -->
+        <dependency>
+            <groupId>org.dromara</groupId>
+            <artifactId>ruoyi-review</artifactId>
+        </dependency>
+
 <!--        &lt;!&ndash; Spring Boot Web Starter &ndash;&gt;-->
 <!--        <dependency>-->
 <!--            <groupId>org.springframework.boot</groupId>-->
