@@ -91,7 +91,8 @@ public class ReviewAgent {
             // 5. 组装 Prompt
             String outputFormat = template.getOutputFormat() != null ? template.getOutputFormat() : "";
             String ruleCountConstraint = "\n\n【重要约束】本次审核共有 " + allRules.size() + " 条规则，你必须对每一条规则都给出审核结论，" +
-                "items 数组中的条目数量必须等于 " + allRules.size() + "。即使某条规则检查通过无问题，也必须返回该条目并标记 match_status 为 matched。不允许遗漏任何规则。\n";
+                "items 数组中的条目数量必须等于 " + allRules.size() + "。即使某条规则检查通过无问题，也必须返回该条目并标记 match_status 为 matched。不允许遗漏任何规则。\n" +
+                "【summary 约束】summary 必须严格基于 items 的实际审核结果来总结，不得与 items 结论矛盾。如果所有 items 的 match_status 都是 matched，summary 不得提及任何不一致或需核查的问题。\n";
             String systemPrompt = template.getSystemPrompt()
                 .replace("{rules}", rulesText + ruleCountConstraint)
                 .replace("{knowledge_context}", knowledgeContext)
