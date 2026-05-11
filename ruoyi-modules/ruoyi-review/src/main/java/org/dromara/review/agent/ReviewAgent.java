@@ -506,12 +506,21 @@ public class ReviewAgent {
             Map<Long, Long> ruleToStandard = allRules.stream()
                 .collect(Collectors.toMap(ReviewStandardRule::getId, ReviewStandardRule::getStandardId, (a, b) -> a));
 
-            // 查询本次审核的 result items
+            // 识别通用标准ID集合
+            List<ReviewStandard> standards = standardMapper.selectByIds(standardIds);
+            Set<Long> systemStandardIds = standards.stream()
+                .filter(s -> "1".equals(s.getIsSystem()))
+                .map(ReviewStandard::getId)
+                .collect(Collectors.toSet());
+
+            // 查询本次审核的全部 result items
             List<ReviewResultItem> resultItems = resultItemMapper.selectList(
                 Wrappers.<ReviewResultItem>lambdaQuery().eq(ReviewResultItem::getTaskId, task.getId())
             );
 
-            // 按知识库分组写入（只写入能通过规则明确定位到知识库的 item）
+            // 按知识库分组写入
+            // 专用标准：所有 item 都写入（正面/负面案例）
+            // 通用标准：只有 mismatched 的 item 才写入（全部通过不浪费资源）
             Map<Long, List<ReviewResultItem>> knowledgeItemsMap = new java.util.HashMap<>();
             for (ReviewResultItem item : resultItems) {
                 if (item.getRuleId() == null) continue;
@@ -519,6 +528,11 @@ public class ReviewAgent {
                 if (stdId == null) continue;
                 Long knowledgeId = standardToKnowledge.get(stdId);
                 if (knowledgeId == null) continue;
+
+                // 通用标准：跳过通过的 item
+                if (systemStandardIds.contains(stdId) && "matched".equals(item.getMatchStatus())) {
+                    continue;
+                }
                 knowledgeItemsMap.computeIfAbsent(knowledgeId, k -> new java.util.ArrayList<>()).add(item);
             }
 
