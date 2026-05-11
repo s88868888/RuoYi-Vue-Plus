@@ -12,13 +12,17 @@ import org.dromara.common.mybatis.core.page.TableDataInfo;
 import cn.hutool.core.collection.CollUtil;
 import org.dromara.common.satoken.utils.LoginHelper;
 import org.dromara.review.domain.ReviewKnowledge;
+import org.dromara.review.domain.ReviewKnowledgeCase;
+import org.dromara.review.domain.ReviewKnowledgePattern;
 import org.dromara.review.domain.ReviewStandard;
 import org.dromara.review.domain.ReviewStandardKnowledge;
 import org.dromara.review.domain.ReviewStandardRule;
 import org.dromara.review.domain.bo.ReviewStandardBo;
 import org.dromara.review.domain.vo.ReviewKnowledgeVo;
 import org.dromara.review.domain.vo.ReviewStandardVo;
+import org.dromara.review.mapper.ReviewKnowledgeCaseMapper;
 import org.dromara.review.mapper.ReviewKnowledgeMapper;
+import org.dromara.review.mapper.ReviewKnowledgePatternMapper;
 import org.dromara.review.mapper.ReviewStandardKnowledgeMapper;
 import org.dromara.review.mapper.ReviewStandardMapper;
 import org.dromara.review.mapper.ReviewStandardRuleMapper;
@@ -47,6 +51,8 @@ public class ReviewStandardServiceImpl implements IReviewStandardService {
     private final ReviewStandardRuleMapper reviewStandardRuleMapper;
     private final ReviewStandardKnowledgeMapper reviewStandardKnowledgeMapper;
     private final ReviewKnowledgeMapper reviewKnowledgeMapper;
+    private final ReviewKnowledgeCaseMapper reviewKnowledgeCaseMapper;
+    private final ReviewKnowledgePatternMapper reviewKnowledgePatternMapper;
 
     /**
      * 查询审核标准详情（同时查关联的知识库和规则列表）
@@ -146,7 +152,32 @@ public class ReviewStandardServiceImpl implements IReviewStandardService {
         List<Long> knowledgeIds = skList.stream()
             .map(ReviewStandardKnowledge::getKnowledgeId)
             .collect(Collectors.toList());
-        return reviewKnowledgeMapper.selectVoByIds(knowledgeIds);
+        List<ReviewKnowledgeVo> voList = reviewKnowledgeMapper.selectVoByIds(knowledgeIds);
+
+        // 填充案例数和模式数
+        if (CollUtil.isNotEmpty(voList)) {
+            List<ReviewKnowledgeCase> allCases = reviewKnowledgeCaseMapper.selectList(
+                Wrappers.<ReviewKnowledgeCase>lambdaQuery()
+                    .in(ReviewKnowledgeCase::getKnowledgeId, knowledgeIds)
+                    .select(ReviewKnowledgeCase::getKnowledgeId)
+            );
+            java.util.Map<Long, Long> caseCountMap = allCases.stream()
+                .collect(Collectors.groupingBy(ReviewKnowledgeCase::getKnowledgeId, Collectors.counting()));
+
+            List<ReviewKnowledgePattern> allPatterns = reviewKnowledgePatternMapper.selectList(
+                Wrappers.<ReviewKnowledgePattern>lambdaQuery()
+                    .in(ReviewKnowledgePattern::getKnowledgeId, knowledgeIds)
+                    .select(ReviewKnowledgePattern::getKnowledgeId)
+            );
+            java.util.Map<Long, Long> patternCountMap = allPatterns.stream()
+                .collect(Collectors.groupingBy(ReviewKnowledgePattern::getKnowledgeId, Collectors.counting()));
+
+            for (ReviewKnowledgeVo vo : voList) {
+                vo.setCaseCount(caseCountMap.getOrDefault(vo.getId(), 0L).intValue());
+                vo.setPatternCount(patternCountMap.getOrDefault(vo.getId(), 0L).intValue());
+            }
+        }
+        return voList;
     }
 
     @Override

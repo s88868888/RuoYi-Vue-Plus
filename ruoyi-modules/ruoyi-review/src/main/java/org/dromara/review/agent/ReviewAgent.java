@@ -54,6 +54,7 @@ public class ReviewAgent {
     private final ReviewRagService reviewRagService;
     private final ReviewKnowledgeCaseMapper knowledgeCaseMapper;
     private final ReviewStandardKnowledgeMapper standardKnowledgeMapper;
+    private final ReviewKnowledgePatternMapper knowledgePatternMapper;
 
     @Transactional(rollbackFor = Exception.class)
     public void execute(Long taskId) {
@@ -115,6 +116,9 @@ public class ReviewAgent {
 
             // 8. 写入知识库案例（审核完成后自动沉淀）
             saveToKnowledgeCase(task, standardIds);
+
+            // 9. 聚合问题模式（同类问题出现≥3次自动归纳）
+            aggregatePatterns(task, standardIds);
 
             log.info("[ReviewAgent] 审核完成: taskId={}, passStatus={}, score={}, model={}, 耗时={}ms",
                 taskId, task.getPassStatus(), task.getScore(), modelUsed, duration);
@@ -507,20 +511,14 @@ public class ReviewAgent {
                 Wrappers.<ReviewResultItem>lambdaQuery().eq(ReviewResultItem::getTaskId, task.getId())
             );
 
-            // 按知识库分组写入
+            // 按知识库分组写入（只写入能通过规则明确定位到知识库的 item）
             Map<Long, List<ReviewResultItem>> knowledgeItemsMap = new java.util.HashMap<>();
             for (ReviewResultItem item : resultItems) {
-                Long knowledgeId = null;
-                if (item.getRuleId() != null) {
-                    Long stdId = ruleToStandard.get(item.getRuleId());
-                    if (stdId != null) {
-                        knowledgeId = standardToKnowledge.get(stdId);
-                    }
-                }
-                if (knowledgeId == null) {
-                    // 未命中规则的 item，写入第一个知识库
-                    knowledgeId = skList.get(0).getKnowledgeId();
-                }
+                if (item.getRuleId() == null) continue;
+                Long stdId = ruleToStandard.get(item.getRuleId());
+                if (stdId == null) continue;
+                Long knowledgeId = standardToKnowledge.get(stdId);
+                if (knowledgeId == null) continue;
                 knowledgeItemsMap.computeIfAbsent(knowledgeId, k -> new java.util.ArrayList<>()).add(item);
             }
 
@@ -547,6 +545,88 @@ public class ReviewAgent {
             log.info("[ReviewAgent] 审核案例已按规则分别写入 {} 个知识库", knowledgeItemsMap.size());
         } catch (Exception e) {
             log.warn("[ReviewAgent] 写入知识库案例失败（不影响审核结果）: {}", e.getMessage());
+        }
+    }
+
+    // ==================== 问题模式聚合 ====================
+
+    /**
+     * 从历史审核结果中聚合问题模式。
+     * 逻辑：统计同一知识库下相同 fieldName + severity 的非通过项出现次数，
+     * 达到阈值（3次）时自动创建或更新问题模式。
+     */
+    private void aggregatePatterns(ReviewTask task, List<Long> standardIds) {
+        try {
+            if (standardIds.isEmpty()) return;
+
+            List<ReviewStandardKnowledge> skList = standardKnowledgeMapper.selectList(
+                Wrappers.<ReviewStandardKnowledge>lambdaQuery().in(ReviewStandardKnowledge::getStandardId, standardIds)
+            );
+            if (skList.isEmpty()) return;
+
+            Map<Long, Long> standardToKnowledge = skList.stream()
+                .collect(Collectors.toMap(ReviewStandardKnowledge::getStandardId, ReviewStandardKnowledge::getKnowledgeId, (a, b) -> a));
+
+            // 构建 规则ID → 标准ID 的映射
+            List<ReviewStandardRule> allRules = standardRuleMapper.selectList(
+                Wrappers.<ReviewStandardRule>lambdaQuery().in(ReviewStandardRule::getStandardId, standardIds)
+            );
+            Map<Long, Long> ruleToStandard = allRules.stream()
+                .collect(Collectors.toMap(ReviewStandardRule::getId, ReviewStandardRule::getStandardId, (a, b) -> a));
+
+            // 查询本次审核中有问题的项
+            List<ReviewResultItem> problemItems = resultItemMapper.selectList(
+                Wrappers.<ReviewResultItem>lambdaQuery()
+                    .eq(ReviewResultItem::getTaskId, task.getId())
+                    .ne(ReviewResultItem::getMatchStatus, "matched")
+            );
+            if (problemItems.isEmpty()) return;
+
+            // 对每个有问题的字段，统计历史上同字段出现问题的总次数
+            for (ReviewResultItem item : problemItems) {
+                if (item.getFieldName() == null || item.getRuleId() == null) continue;
+
+                // 通过规则定位到知识库
+                Long stdId = ruleToStandard.get(item.getRuleId());
+                if (stdId == null) continue;
+                Long knowledgeId = standardToKnowledge.get(stdId);
+                if (knowledgeId == null) continue;
+
+                long historyCount = resultItemMapper.selectCount(
+                    Wrappers.<ReviewResultItem>lambdaQuery()
+                        .eq(ReviewResultItem::getFieldName, item.getFieldName())
+                        .ne(ReviewResultItem::getMatchStatus, "matched")
+                        .eq(ReviewResultItem::getMisjudged, "0")
+                );
+
+                if (historyCount < 3) continue;
+
+                // 检查是否已存在该模式
+                String patternName = item.getFieldName() + "_" + (item.getSeverity() != null ? item.getSeverity() : "error");
+                ReviewKnowledgePattern existing = knowledgePatternMapper.selectOne(
+                    Wrappers.<ReviewKnowledgePattern>lambdaQuery()
+                        .eq(ReviewKnowledgePattern::getKnowledgeId, knowledgeId)
+                        .eq(ReviewKnowledgePattern::getPatternName, patternName)
+                );
+
+                if (existing != null) {
+                    existing.setFrequency((int) historyCount);
+                    knowledgePatternMapper.updateById(existing);
+                } else {
+                    ReviewKnowledgePattern pattern = new ReviewKnowledgePattern();
+                    pattern.setKnowledgeId(knowledgeId);
+                    pattern.setPatternName(patternName);
+                    pattern.setDescription(String.format("字段「%s」频繁出现%s级别问题，已累计 %d 次",
+                        item.getFieldLabel() != null ? item.getFieldLabel() : item.getFieldName(),
+                        item.getSeverity(), historyCount));
+                    pattern.setFrequency((int) historyCount);
+                    pattern.setSolution(item.getSuggestion());
+                    knowledgePatternMapper.insert(pattern);
+                    log.info("[ReviewAgent] 新增问题模式: {} (频次:{})", patternName, historyCount);
+                }
+            }
+        } catch (Exception e) {
+            log.warn("[ReviewAgent] 聚合问题模式失败（不影响审核结果）: {}", e.getMessage());
         }
     }
 
