@@ -2,10 +2,13 @@ package org.dromara.review.service.impl;
 
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
 import com.baomidou.mybatisplus.core.toolkit.Wrappers;
+import com.baomidou.mybatisplus.extension.plugins.pagination.Page;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.dromara.common.core.utils.MapstructUtils;
 import org.dromara.common.core.utils.StringUtils;
+import org.dromara.common.mybatis.core.page.PageQuery;
+import org.dromara.common.mybatis.core.page.TableDataInfo;
 import org.dromara.review.domain.ReviewStandardRule;
 import org.dromara.review.domain.bo.ReviewStandardRuleBo;
 import org.dromara.review.domain.vo.ReviewStandardRuleVo;
@@ -47,6 +50,16 @@ public class ReviewStandardRuleServiceImpl implements IReviewStandardRuleService
         lqw.eq(ReviewStandardRule::getStandardId, standardId);
         lqw.orderByAsc(ReviewStandardRule::getSortOrder);
         return baseMapper.selectVoList(lqw);
+    }
+
+    /**
+     * 分页查询规则列表
+     */
+    @Override
+    public TableDataInfo<ReviewStandardRuleVo> queryPageList(ReviewStandardRuleBo bo, PageQuery pageQuery) {
+        LambdaQueryWrapper<ReviewStandardRule> lqw = buildQueryWrapper(bo);
+        Page<ReviewStandardRuleVo> result = baseMapper.selectVoPage(pageQuery.build(), lqw);
+        return TableDataInfo.build(result);
     }
 
     private LambdaQueryWrapper<ReviewStandardRule> buildQueryWrapper(ReviewStandardRuleBo bo) {

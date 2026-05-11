@@ -1,5 +1,7 @@
 package org.dromara.review.service;
 
+import org.dromara.common.mybatis.core.page.PageQuery;
+import org.dromara.common.mybatis.core.page.TableDataInfo;
 import org.dromara.review.domain.bo.ReviewStandardRuleBo;
 import org.dromara.review.domain.vo.ReviewStandardRuleVo;
 
@@ -23,6 +25,11 @@ public interface IReviewStandardRuleService {
      * 按标准ID查询规则列表
      */
     List<ReviewStandardRuleVo> queryListByStandardId(Long standardId);
+
+    /**
+     * 分页查询规则列表
+     */
+    TableDataInfo<ReviewStandardRuleVo> queryPageList(ReviewStandardRuleBo bo, PageQuery pageQuery);
 
     /**
      * 新增审核标准规则

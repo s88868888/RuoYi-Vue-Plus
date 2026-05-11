@@ -22,8 +22,10 @@ import org.springframework.stereotype.Component;
 import org.springframework.transaction.annotation.Transactional;
 
 import java.nio.file.Path;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.stream.Collectors;
 
 /**
@@ -87,8 +89,10 @@ public class ReviewAgent {
 
             // 5. 组装 Prompt
             String outputFormat = template.getOutputFormat() != null ? template.getOutputFormat() : "";
+            String ruleCountConstraint = "\n\n【重要约束】本次审核共有 " + allRules.size() + " 条规则，你必须对每一条规则都给出审核结论，" +
+                "items 数组中的条目数量必须等于 " + allRules.size() + "。即使某条规则检查通过无问题，也必须返回该条目并标记 match_status 为 matched。不允许遗漏任何规则。\n";
             String systemPrompt = template.getSystemPrompt()
-                .replace("{rules}", rulesText)
+                .replace("{rules}", rulesText + ruleCountConstraint)
                 .replace("{knowledge_context}", knowledgeContext)
                 .replace("{output_format}", outputFormat);
 
@@ -107,7 +111,7 @@ public class ReviewAgent {
 
             long duration = System.currentTimeMillis() - startTime;
             String modelUsed = determineModel(files, template);
-            updateTaskStatus(task, result, duration, allRules.size(), modelUsed, aiResponse);
+            updateTaskStatus(task, result, duration, allRules, modelUsed, aiResponse);
 
             // 8. 写入知识库案例（审核完成后自动沉淀）
             saveToKnowledgeCase(task, standardIds);
@@ -249,7 +253,14 @@ public class ReviewAgent {
                 case "suggest" -> "【提示】";
                 default -> "【" + rule.getSeverity() + "】";
             };
-            sb.append(i + 1).append(". ").append(severityLabel).append(" ").append(rule.getContent());
+            sb.append(i + 1).append(". ").append(severityLabel);
+            if (rule.getWeight() != null && rule.getWeight() > 0) {
+                sb.append("[权重:").append(rule.getWeight()).append("]");
+            }
+            sb.append(" ").append(rule.getContent());
+            if (rule.getCategory() != null && !rule.getCategory().isBlank()) {
+                sb.append(" (分类: ").append(rule.getCategory()).append(")");
+            }
             if (rule.getCheckField() != null) {
                 sb.append(" (检查字段: ").append(rule.getCheckField()).append(")");
             }
@@ -294,6 +305,8 @@ public class ReviewAgent {
             return;
         }
 
+        Set<Long> coveredRuleIds = new HashSet<>();
+
         for (int i = 0; i < items.size(); i++) {
             JSONObject item = items.getJSONObject(i);
             ReviewResultItem resultItem = new ReviewResultItem();
@@ -324,6 +337,7 @@ public class ReviewAgent {
                     .findFirst()
                     .ifPresent(r -> {
                         resultItem.setRuleId(r.getId());
+                        coveredRuleIds.add(r.getId());
                         r.setHitCount(r.getHitCount() + 1);
                         standardRuleMapper.updateById(r);
                     });
@@ -331,18 +345,38 @@ public class ReviewAgent {
 
             resultItemMapper.insert(resultItem);
         }
+
+        // 补充 AI 未覆盖的规则，默认标记为通过
+        int sortOrder = items.size();
+        for (ReviewStandardRule rule : rules) {
+            if (!coveredRuleIds.contains(rule.getId())) {
+                sortOrder++;
+                ReviewResultItem passItem = new ReviewResultItem();
+                passItem.setTaskId(task.getId());
+                passItem.setRuleId(rule.getId());
+                passItem.setFieldName(rule.getCheckField());
+                passItem.setFieldLabel(rule.getContent());
+                passItem.setSeverity("info");
+                passItem.setMatchStatus("matched");
+                passItem.setConfidence(new java.math.BigDecimal("100.00"));
+                passItem.setDescription("该规则已通过审核，未发现问题");
+                passItem.setSuggestion("无问题。");
+                passItem.setSortOrder(sortOrder);
+                passItem.setMisjudged("0");
+                resultItemMapper.insert(passItem);
+            }
+        }
     }
 
-    private void updateTaskStatus(ReviewTask task, JSONObject result, long duration, int totalRules, String modelUsed, String aiResponse) {
+    private void updateTaskStatus(ReviewTask task, JSONObject result, long duration, List<ReviewStandardRule> allRules, String modelUsed, String aiResponse) {
         task.setStatus("completed");
         task.setPassStatus(mapPassStatus(result.getString("pass_status")));
-        task.setScore(result.getInteger("score"));
         task.setAiModel(modelUsed);
         task.setReviewDuration(duration);
         task.setAiSummary(result.getString("summary"));
         task.setResultJson(aiResponse);
         task.setResultMarkdown(result.getString("detail_markdown"));
-        task.setTotalRules(totalRules);
+        task.setTotalRules(allRules.size());
 
         JSONArray items = result.getJSONArray("items");
         int errorCount = 0, warningCount = 0, infoCount = 0, passCount = 0;
@@ -353,8 +387,7 @@ public class ReviewAgent {
                 String severity = item.getString("severity");
                 if ("matched".equals(status)) {
                     passCount++;
-                }
-                if ("error".equals(severity)) {
+                } else if ("error".equals(severity)) {
                     errorCount++;
                 } else if ("warning".equals(severity)) {
                     warningCount++;
@@ -366,8 +399,11 @@ public class ReviewAgent {
         task.setErrorCount(errorCount);
         task.setWarningCount(warningCount);
         task.setInfoCount(infoCount);
-        task.setPassCount(passCount);
+        // AI 未覆盖的规则视为通过
+        int uncoveredCount = allRules.size() - (items != null ? items.size() : 0);
+        task.setPassCount(passCount + Math.max(uncoveredCount, 0));
         task.setMisjudgedCount(0);
+        task.setScore(calculateWeightedScore(allRules, items));
         taskMapper.updateById(task);
 
         List<ReviewTaskStandard> taskStandards = taskStandardMapper.selectList(
@@ -380,6 +416,68 @@ public class ReviewAgent {
                 standardMapper.updateById(standard);
             }
         }
+    }
+
+    // ==================== 加权评分 ====================
+
+    /**
+     * 根据规则权重计算加权得分。
+     * 算法：每条规则视为一个评分项，matched 得满分（该规则权重），非 matched 按严重程度扣分。
+     * 最终 score = 实际得分 / 总权重 * 100，范围 0~100。
+     */
+    private int calculateWeightedScore(List<ReviewStandardRule> allRules, JSONArray items) {
+        if (allRules.isEmpty()) return 100;
+
+        // 总权重 = 所有规则权重之和
+        int totalWeight = allRules.stream()
+            .mapToInt(r -> r.getWeight() != null && r.getWeight() > 0 ? r.getWeight() : getDefaultWeight(r.getSeverity()))
+            .sum();
+        if (totalWeight == 0) return 100;
+
+        // 记录哪些规则被 AI 判定为有问题
+        java.util.Set<String> problemFields = new java.util.HashSet<>();
+        Map<String, String> fieldSeverity = new java.util.HashMap<>();
+        if (items != null) {
+            for (int i = 0; i < items.size(); i++) {
+                JSONObject item = items.getJSONObject(i);
+                String matchStatus = item.getString("match_status");
+                String fieldName = item.getString("field_name");
+                if (!"matched".equals(matchStatus) && fieldName != null) {
+                    problemFields.add(fieldName);
+                    fieldSeverity.put(fieldName, item.getString("severity"));
+                }
+            }
+        }
+
+        // 计算得分：通过的规则得满权重，有问题的按严重程度扣分
+        int earnedWeight = 0;
+        for (ReviewStandardRule rule : allRules) {
+            int weight = rule.getWeight() != null && rule.getWeight() > 0 ? rule.getWeight() : getDefaultWeight(rule.getSeverity());
+            String checkField = rule.getCheckField();
+            if (checkField != null && problemFields.contains(checkField)) {
+                String severity = fieldSeverity.get(checkField);
+                // error 扣全部权重，warning 扣 60%，info 扣 20%
+                double deduction = switch (severity != null ? severity : "error") {
+                    case "warning" -> 0.6;
+                    case "info" -> 0.2;
+                    default -> 1.0;
+                };
+                earnedWeight += (int) (weight * (1.0 - deduction));
+            } else {
+                earnedWeight += weight;
+            }
+        }
+
+        return Math.max(0, Math.min(100, (int) Math.round((double) earnedWeight / totalWeight * 100)));
+    }
+
+    private int getDefaultWeight(String severity) {
+        return switch (severity != null ? severity : "should") {
+            case "must" -> 90;
+            case "should" -> 70;
+            case "suggest" -> 40;
+            default -> 70;
+        };
     }
 
     // ==================== 知识库沉淀 ====================

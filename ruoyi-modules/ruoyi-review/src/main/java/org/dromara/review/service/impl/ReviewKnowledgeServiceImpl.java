@@ -69,14 +69,34 @@ public class ReviewKnowledgeServiceImpl implements IReviewKnowledgeService {
         List<ReviewKnowledgeVo> records = result.getRecords();
         if (CollUtil.isNotEmpty(records)) {
             List<Long> knowledgeIds = records.stream().map(ReviewKnowledgeVo::getId).collect(Collectors.toList());
+            // 关联标准数
             List<ReviewStandardKnowledge> allLinks = standardKnowledgeMapper.selectList(
                 Wrappers.<ReviewStandardKnowledge>lambdaQuery()
                     .in(ReviewStandardKnowledge::getKnowledgeId, knowledgeIds)
             );
-            java.util.Map<Long, Long> countMap = allLinks.stream()
+            java.util.Map<Long, Long> linkCountMap = allLinks.stream()
                 .collect(Collectors.groupingBy(ReviewStandardKnowledge::getKnowledgeId, Collectors.counting()));
+            // 实际案例数
+            List<ReviewKnowledgeCase> allCases = caseMapper.selectList(
+                Wrappers.<ReviewKnowledgeCase>lambdaQuery()
+                    .in(ReviewKnowledgeCase::getKnowledgeId, knowledgeIds)
+                    .select(ReviewKnowledgeCase::getKnowledgeId)
+            );
+            java.util.Map<Long, Long> caseCountMap = allCases.stream()
+                .collect(Collectors.groupingBy(ReviewKnowledgeCase::getKnowledgeId, Collectors.counting()));
+            // 实际模式数
+            List<ReviewKnowledgePattern> allPatterns = patternMapper.selectList(
+                Wrappers.<ReviewKnowledgePattern>lambdaQuery()
+                    .in(ReviewKnowledgePattern::getKnowledgeId, knowledgeIds)
+                    .select(ReviewKnowledgePattern::getKnowledgeId)
+            );
+            java.util.Map<Long, Long> patternCountMap = allPatterns.stream()
+                .collect(Collectors.groupingBy(ReviewKnowledgePattern::getKnowledgeId, Collectors.counting()));
+
             for (ReviewKnowledgeVo vo : records) {
-                vo.setLinkedStandardCount(countMap.getOrDefault(vo.getId(), 0L).intValue());
+                vo.setLinkedStandardCount(linkCountMap.getOrDefault(vo.getId(), 0L).intValue());
+                vo.setCaseCount(caseCountMap.getOrDefault(vo.getId(), 0L).intValue());
+                vo.setPatternCount(patternCountMap.getOrDefault(vo.getId(), 0L).intValue());
             }
         }
         return TableDataInfo.build(result);

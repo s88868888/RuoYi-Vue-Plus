@@ -129,14 +129,16 @@ public class ReviewStandardController extends BaseController {
     // ==================== 规则子资源 ====================
 
     /**
-     * 查询标准下的规则列表
+     * 分页查询标准下的规则列表
      *
      * @param standardId 标准ID
      */
     @SaCheckPermission("review:standard:query")
     @GetMapping("/{standardId}/rules")
-    public R<List<ReviewStandardRuleVo>> listRules(@NotNull(message = "标准ID不能为空") @PathVariable Long standardId) {
-        return R.ok(reviewStandardRuleService.queryListByStandardId(standardId));
+    public TableDataInfo<ReviewStandardRuleVo> listRules(@NotNull(message = "标准ID不能为空") @PathVariable Long standardId,
+                                                         ReviewStandardRuleBo bo, PageQuery pageQuery) {
+        bo.setStandardId(standardId);
+        return reviewStandardRuleService.queryPageList(bo, pageQuery);
     }
 
     /**
