@@ -4,6 +4,8 @@ import cn.idev.excel.annotation.ExcelIgnoreUnannotated;
 import cn.idev.excel.annotation.ExcelProperty;
 import io.github.linpeilie.annotations.AutoMapper;
 import lombok.Data;
+import org.dromara.common.translation.annotation.Translation;
+import org.dromara.common.translation.constant.TransConstant;
 import org.dromara.review.domain.ReviewStandard;
 
 import java.io.Serial;
@@ -95,5 +97,16 @@ public class ReviewStandardVo implements Serializable {
      */
     @ExcelProperty(value = "更新时间")
     private Date updateTime;
+
+    /**
+     * 更新人ID
+     */
+    private Long updateBy;
+
+    /**
+     * 更新人名称
+     */
+    @Translation(type = TransConstant.USER_ID_TO_NAME, mapper = "updateBy")
+    private String updateByName;
 
 }

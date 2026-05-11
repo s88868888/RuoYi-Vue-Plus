@@ -103,4 +103,9 @@ public class ReviewKnowledgeVo implements Serializable {
     @ExcelProperty(value = "更新时间")
     private Date updateTime;
 
+    /**
+     * 关联标准数量（非持久化）
+     */
+    private Integer linkedStandardCount;
+
 }

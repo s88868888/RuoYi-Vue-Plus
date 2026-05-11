@@ -66,6 +66,19 @@ public class ReviewKnowledgeServiceImpl implements IReviewKnowledgeService {
     public TableDataInfo<ReviewKnowledgeVo> queryPageList(ReviewKnowledgeBo bo, PageQuery pageQuery) {
         LambdaQueryWrapper<ReviewKnowledge> lqw = buildQueryWrapper(bo);
         Page<ReviewKnowledgeVo> result = baseMapper.selectVoPage(pageQuery.build(), lqw);
+        List<ReviewKnowledgeVo> records = result.getRecords();
+        if (CollUtil.isNotEmpty(records)) {
+            List<Long> knowledgeIds = records.stream().map(ReviewKnowledgeVo::getId).collect(Collectors.toList());
+            List<ReviewStandardKnowledge> allLinks = standardKnowledgeMapper.selectList(
+                Wrappers.<ReviewStandardKnowledge>lambdaQuery()
+                    .in(ReviewStandardKnowledge::getKnowledgeId, knowledgeIds)
+            );
+            java.util.Map<Long, Long> countMap = allLinks.stream()
+                .collect(Collectors.groupingBy(ReviewStandardKnowledge::getKnowledgeId, Collectors.counting()));
+            for (ReviewKnowledgeVo vo : records) {
+                vo.setLinkedStandardCount(countMap.getOrDefault(vo.getId(), 0L).intValue());
+            }
+        }
         return TableDataInfo.build(result);
     }
 

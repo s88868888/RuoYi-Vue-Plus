@@ -36,7 +36,6 @@ public class ReviewStandardBo extends BaseEntity {
     /**
      * 标准类型
      */
-    @NotBlank(message = "标准类型不能为空", groups = {AddGroup.class, EditGroup.class})
     private String type;
 
     /**

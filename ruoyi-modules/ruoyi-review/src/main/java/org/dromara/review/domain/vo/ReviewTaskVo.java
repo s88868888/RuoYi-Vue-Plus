@@ -4,6 +4,8 @@ import cn.idev.excel.annotation.ExcelIgnoreUnannotated;
 import cn.idev.excel.annotation.ExcelProperty;
 import io.github.linpeilie.annotations.AutoMapper;
 import lombok.Data;
+import org.dromara.common.translation.annotation.Translation;
+import org.dromara.common.translation.constant.TransConstant;
 import org.dromara.review.domain.ReviewTask;
 
 import java.io.Serial;
@@ -174,6 +176,11 @@ public class ReviewTaskVo implements Serializable {
     private Date createTime;
 
     /**
+     * 创建人ID
+     */
+    private Long createBy;
+
+    /**
      * 更新时间
      */
     @ExcelProperty(value = "更新时间")
@@ -183,6 +190,12 @@ public class ReviewTaskVo implements Serializable {
      * 关联的标准名称（逗号拼接，非Entity字段，Service层手动设置）
      */
     private String standardNames;
+
+    /**
+     * 创建人昵称
+     */
+    @Translation(type = TransConstant.USER_ID_TO_NAME, mapper = "createBy")
+    private String createByName;
 
     /**
      * 附件列表（非Entity字段，Service层手动设置）

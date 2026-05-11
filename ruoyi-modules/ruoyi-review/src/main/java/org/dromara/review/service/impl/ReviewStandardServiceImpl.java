@@ -10,6 +10,7 @@ import org.dromara.common.core.utils.StringUtils;
 import org.dromara.common.mybatis.core.page.PageQuery;
 import org.dromara.common.mybatis.core.page.TableDataInfo;
 import cn.hutool.core.collection.CollUtil;
+import org.dromara.common.satoken.utils.LoginHelper;
 import org.dromara.review.domain.ReviewKnowledge;
 import org.dromara.review.domain.ReviewStandard;
 import org.dromara.review.domain.ReviewStandardKnowledge;
@@ -27,6 +28,7 @@ import org.springframework.transaction.annotation.Transactional;
 
 import java.util.Collection;
 import java.util.Collections;
+import java.util.Date;
 import java.util.List;
 import java.util.stream.Collectors;
 
@@ -97,6 +99,11 @@ public class ReviewStandardServiceImpl implements IReviewStandardService {
     @Override
     @Transactional(rollbackFor = Exception.class)
     public Boolean insertByBo(ReviewStandardBo bo) {
+
+        bo.setCreateBy(LoginHelper.getUserId());
+        bo.setCreateTime(new Date());
+        bo.setUpdateBy(LoginHelper.getUserId());
+        bo.setUpdateTime(new Date());
         ReviewStandard add = MapstructUtils.convert(bo, ReviewStandard.class);
         boolean flag = baseMapper.insert(add) > 0;
         if (flag) {
@@ -111,6 +118,9 @@ public class ReviewStandardServiceImpl implements IReviewStandardService {
     @Override
     @Transactional(rollbackFor = Exception.class)
     public Boolean updateByBo(ReviewStandardBo bo) {
+
+        bo.setUpdateBy(LoginHelper.getUserId());
+        bo.setUpdateTime(new Date());
         ReviewStandard update = MapstructUtils.convert(bo, ReviewStandard.class);
         return baseMapper.updateById(update) > 0;
     }

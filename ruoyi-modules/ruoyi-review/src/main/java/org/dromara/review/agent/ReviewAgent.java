@@ -23,6 +23,7 @@ import org.springframework.transaction.annotation.Transactional;
 
 import java.nio.file.Path;
 import java.util.List;
+import java.util.Map;
 import java.util.stream.Collectors;
 
 /**
@@ -85,17 +86,15 @@ public class ReviewAgent {
             String rulesText = buildRulesText(allRules);
 
             // 5. 组装 Prompt
+            String outputFormat = template.getOutputFormat() != null ? template.getOutputFormat() : "";
             String systemPrompt = template.getSystemPrompt()
                 .replace("{rules}", rulesText)
-                .replace("{knowledge_context}", knowledgeContext);
-
-            // 追加输出格式要求
-            if (template.getOutputFormat() != null && !template.getOutputFormat().isBlank()) {
-                systemPrompt += "\n\n请严格按照以下JSON格式返回审核结果，不要返回其他内容：\n" + template.getOutputFormat();
-            }
+                .replace("{knowledge_context}", knowledgeContext)
+                .replace("{output_format}", outputFormat);
 
             String userPrompt = template.getUserPrompt()
-                .replace("{form_data}", task.getFormSnapshot() != null ? task.getFormSnapshot() : "{}");
+                .replace("{form_data}", task.getFormSnapshot() != null ? task.getFormSnapshot() : "{}")
+                .replace("{output_format}", outputFormat);
 
             // 6. 根据附件类型选择 AI 调用方式
             String aiResponse = callAi(files, systemPrompt, userPrompt, template);
@@ -354,11 +353,12 @@ public class ReviewAgent {
                 String severity = item.getString("severity");
                 if ("matched".equals(status)) {
                     passCount++;
-                } else if ("error".equals(severity)) {
+                }
+                if ("error".equals(severity)) {
                     errorCount++;
                 } else if ("warning".equals(severity)) {
                     warningCount++;
-                } else {
+                } else if ("info".equals(severity)) {
                     infoCount++;
                 }
             }
@@ -387,33 +387,66 @@ public class ReviewAgent {
     private void saveToKnowledgeCase(ReviewTask task, List<Long> standardIds) {
         try {
             if (standardIds.isEmpty()) return;
+
+            // 构建 标准ID → 知识库ID 的映射
             List<ReviewStandardKnowledge> skList = standardKnowledgeMapper.selectList(
                 Wrappers.<ReviewStandardKnowledge>lambdaQuery().in(ReviewStandardKnowledge::getStandardId, standardIds)
             );
             if (skList.isEmpty()) return;
 
-            List<Long> knowledgeIds = skList.stream()
-                .map(ReviewStandardKnowledge::getKnowledgeId)
-                .distinct()
-                .collect(Collectors.toList());
+            Map<Long, Long> standardToKnowledge = skList.stream()
+                .collect(Collectors.toMap(ReviewStandardKnowledge::getStandardId, ReviewStandardKnowledge::getKnowledgeId, (a, b) -> a));
 
-            for (Long knowledgeId : knowledgeIds) {
+            // 构建 规则ID → 标准ID 的映射
+            List<ReviewStandardRule> allRules = standardRuleMapper.selectList(
+                Wrappers.<ReviewStandardRule>lambdaQuery().in(ReviewStandardRule::getStandardId, standardIds)
+            );
+            Map<Long, Long> ruleToStandard = allRules.stream()
+                .collect(Collectors.toMap(ReviewStandardRule::getId, ReviewStandardRule::getStandardId, (a, b) -> a));
+
+            // 查询本次审核的 result items
+            List<ReviewResultItem> resultItems = resultItemMapper.selectList(
+                Wrappers.<ReviewResultItem>lambdaQuery().eq(ReviewResultItem::getTaskId, task.getId())
+            );
+
+            // 按知识库分组写入
+            Map<Long, List<ReviewResultItem>> knowledgeItemsMap = new java.util.HashMap<>();
+            for (ReviewResultItem item : resultItems) {
+                Long knowledgeId = null;
+                if (item.getRuleId() != null) {
+                    Long stdId = ruleToStandard.get(item.getRuleId());
+                    if (stdId != null) {
+                        knowledgeId = standardToKnowledge.get(stdId);
+                    }
+                }
+                if (knowledgeId == null) {
+                    // 未命中规则的 item，写入第一个知识库
+                    knowledgeId = skList.get(0).getKnowledgeId();
+                }
+                knowledgeItemsMap.computeIfAbsent(knowledgeId, k -> new java.util.ArrayList<>()).add(item);
+            }
+
+            // 每个知识库写一条案例
+            for (Map.Entry<Long, List<ReviewResultItem>> entry : knowledgeItemsMap.entrySet()) {
+                Long knowledgeId = entry.getKey();
+                List<ReviewResultItem> items = entry.getValue();
+
+                String itemsSummary = items.stream()
+                    .map(i -> (i.getFieldLabel() != null ? i.getFieldLabel() : i.getFieldName()) + ": " + (i.getDescription() != null ? i.getDescription() : ""))
+                    .collect(Collectors.joining("; "));
+
                 ReviewKnowledgeCase kcase = new ReviewKnowledgeCase();
                 kcase.setKnowledgeId(knowledgeId);
                 kcase.setTitle(task.getTaskName());
                 kcase.setCaseType("pass".equals(task.getPassStatus()) ? "positive" : "negative");
-                kcase.setScenario(task.getFormSnapshot() != null && task.getFormSnapshot().length() > 200
-                    ? task.getFormSnapshot().substring(0, 200) + "..."
-                    : task.getFormSnapshot());
+                kcase.setScenario(itemsSummary.length() > 200 ? itemsSummary.substring(0, 200) + "..." : itemsSummary);
                 kcase.setFormData(task.getFormSnapshot());
                 kcase.setReviewConclusion(task.getAiSummary());
-                kcase.setKeyPoint(task.getAiSummary() != null && task.getAiSummary().length() > 100
-                    ? task.getAiSummary().substring(0, 100)
-                    : task.getAiSummary());
+                kcase.setKeyPoint(itemsSummary.length() > 100 ? itemsSummary.substring(0, 100) : itemsSummary);
                 knowledgeCaseMapper.insert(kcase);
             }
 
-            log.info("[ReviewAgent] 审核案例已写入 {} 个知识库", knowledgeIds.size());
+            log.info("[ReviewAgent] 审核案例已按规则分别写入 {} 个知识库", knowledgeItemsMap.size());
         } catch (Exception e) {
             log.warn("[ReviewAgent] 写入知识库案例失败（不影响审核结果）: {}", e.getMessage());
         }
