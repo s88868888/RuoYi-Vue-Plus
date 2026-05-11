@@ -34,6 +34,11 @@ public class ReviewTaskFile extends TenantEntity {
     private Long taskId;
 
     /**
+     * OSS文件ID
+     */
+    private Long ossId;
+
+    /**
      * 文件名称
      */
     private String fileName;

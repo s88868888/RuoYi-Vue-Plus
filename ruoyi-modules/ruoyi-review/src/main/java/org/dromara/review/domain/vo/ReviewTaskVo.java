@@ -9,6 +9,7 @@ import org.dromara.review.domain.ReviewTask;
 import java.io.Serial;
 import java.io.Serializable;
 import java.util.Date;
+import java.util.List;
 
 
 /**
@@ -108,6 +109,11 @@ public class ReviewTaskVo implements Serializable {
     private String aiSummary;
 
     /**
+     * AI审核报告Markdown
+     */
+    private String resultMarkdown;
+
+    /**
      * 总规则数
      */
     @ExcelProperty(value = "总规则数")
@@ -177,5 +183,20 @@ public class ReviewTaskVo implements Serializable {
      * 关联的标准名称（逗号拼接，非Entity字段，Service层手动设置）
      */
     private String standardNames;
+
+    /**
+     * 附件列表（非Entity字段，Service层手动设置）
+     */
+    private List<ReviewTaskFileVo> files;
+
+    @Data
+    public static class ReviewTaskFileVo {
+        private Long id;
+        private Long ossId;
+        private String fileName;
+        private String fileType;
+        private String filePath;
+        private Long fileSize;
+    }
 
 }

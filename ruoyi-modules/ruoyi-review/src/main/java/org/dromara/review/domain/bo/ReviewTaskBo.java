@@ -67,8 +67,26 @@ public class ReviewTaskBo extends BaseEntity {
     private List<Long> standardIds;
 
     /**
+     * 表单快照
+     */
+    private String formSnapshot;
+
+    /**
+     * 附件列表（非Entity字段，Service层处理）
+     */
+    private List<TaskFileBo> files;
+
+    /**
      * 备注
      */
     private String remark;
 
+    @Data
+    public static class TaskFileBo {
+        private Long ossId;
+        private String fileName;
+        private String fileType;
+        private String filePath;
+        private Long fileSize;
+    }
 }

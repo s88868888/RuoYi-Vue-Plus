@@ -3,9 +3,11 @@ package org.dromara.review.service;
 import org.dromara.common.mybatis.core.page.PageQuery;
 import org.dromara.common.mybatis.core.page.TableDataInfo;
 import org.dromara.review.domain.bo.ReviewTaskBo;
+import org.dromara.review.domain.vo.ReviewResultItemVo;
 import org.dromara.review.domain.vo.ReviewTaskVo;
 
 import java.util.Collection;
+import java.util.List;
 
 /**
  * 审核任务Service接口
@@ -49,5 +51,10 @@ public interface IReviewTaskService {
      * 标记误判
      */
     void markMisjudgment(Long resultItemId, String reason);
+
+    /**
+     * 查询任务的审核结果明细列表
+     */
+    List<ReviewResultItemVo> queryResultItems(Long taskId);
 
 }

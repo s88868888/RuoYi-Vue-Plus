@@ -55,6 +55,13 @@ public class MilvusVectorStoreService {
      * 创建集合
      */
     public boolean createCollection(String collectionName) {
+        return createCollection(collectionName, "公司资源向量数据集合");
+    }
+
+    /**
+     * 创建集合（自定义描述）
+     */
+    public boolean createCollection(String collectionName, String description) {
         try {
             // 检查集合是否存在
             R<Boolean> hasCollection = milvusClient.hasCollection(
@@ -115,7 +122,7 @@ public class MilvusVectorStoreService {
             // 创建集合
             CreateCollectionParam createParam = CreateCollectionParam.newBuilder()
                 .withCollectionName(collectionName)
-                .withDescription("公司资源向量数据集合")
+                .withDescription(description)
                 .withFieldTypes(fields)
                 .build();
 

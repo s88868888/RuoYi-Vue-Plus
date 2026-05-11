@@ -8,12 +8,20 @@ import com.baomidou.mybatisplus.core.toolkit.Wrappers;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.dromara.common.ai.service.AiChatService;
+import org.dromara.common.oss.core.OssClient;
+import org.dromara.common.oss.factory.OssFactory;
+import org.dromara.common.tenant.helper.TenantHelper;
 import org.dromara.review.domain.*;
 import org.dromara.review.mapper.*;
 import org.dromara.review.service.ReviewRagService;
+import org.dromara.system.domain.vo.SysOssVo;
+import org.dromara.system.service.ISysOssService;
+import org.springframework.core.io.FileSystemResource;
+import org.springframework.core.io.Resource;
 import org.springframework.stereotype.Component;
 import org.springframework.transaction.annotation.Transactional;
 
+import java.nio.file.Path;
 import java.util.List;
 import java.util.stream.Collectors;
 
@@ -32,6 +40,7 @@ import java.util.stream.Collectors;
 public class ReviewAgent {
 
     private final AiChatService aiChatService;
+    private final ISysOssService ossService;
     private final ReviewTaskMapper taskMapper;
     private final ReviewTaskFileMapper taskFileMapper;
     private final ReviewTaskStandardMapper taskStandardMapper;
@@ -40,6 +49,8 @@ public class ReviewAgent {
     private final ReviewResultItemMapper resultItemMapper;
     private final ReviewPromptTemplateMapper promptTemplateMapper;
     private final ReviewRagService reviewRagService;
+    private final ReviewKnowledgeCaseMapper knowledgeCaseMapper;
+    private final ReviewStandardKnowledgeMapper standardKnowledgeMapper;
 
     @Transactional(rollbackFor = Exception.class)
     public void execute(Long taskId) {
@@ -78,6 +89,11 @@ public class ReviewAgent {
                 .replace("{rules}", rulesText)
                 .replace("{knowledge_context}", knowledgeContext);
 
+            // 追加输出格式要求
+            if (template.getOutputFormat() != null && !template.getOutputFormat().isBlank()) {
+                systemPrompt += "\n\n请严格按照以下JSON格式返回审核结果，不要返回其他内容：\n" + template.getOutputFormat();
+            }
+
             String userPrompt = template.getUserPrompt()
                 .replace("{form_data}", task.getFormSnapshot() != null ? task.getFormSnapshot() : "{}");
 
@@ -92,7 +108,10 @@ public class ReviewAgent {
 
             long duration = System.currentTimeMillis() - startTime;
             String modelUsed = determineModel(files, template);
-            updateTaskStatus(task, result, duration, allRules.size(), modelUsed);
+            updateTaskStatus(task, result, duration, allRules.size(), modelUsed, aiResponse);
+
+            // 8. 写入知识库案例（审核完成后自动沉淀）
+            saveToKnowledgeCase(task, standardIds);
 
             log.info("[ReviewAgent] 审核完成: taskId={}, passStatus={}, score={}, model={}, 耗时={}ms",
                 taskId, task.getPassStatus(), task.getScore(), modelUsed, duration);
@@ -114,28 +133,53 @@ public class ReviewAgent {
         ReviewTaskFile docFile = files.stream().filter(f -> isDocumentFile(f.getFileType())).findFirst().orElse(null);
 
         if (imageFile != null) {
-            log.info("[ReviewAgent] 检测到图片附件，使用视觉模型 (qwen3-vl-plus)");
-            return aiChatService.chatWithImage(systemPrompt, imageFile.getFilePath(), userPrompt);
+            log.info("[ReviewAgent] 检测到图片附件，使用视觉模型 (qwen3-vl-plus), ossId={}", imageFile.getOssId());
+            try {
+                Resource resource = downloadFileAsResource(imageFile);
+                return aiChatService.chatWithImage(systemPrompt, resource, userPrompt);
+            } catch (Exception e) {
+                log.error("[ReviewAgent] 图片文件下载或分析失败: {}", e.getMessage(), e);
+                throw new RuntimeException("图片审核失败: " + e.getMessage(), e);
+            }
         }
 
         if (docFile != null) {
-            log.info("[ReviewAgent] 检测到文档附件，使用文档分析模型 (qwen-long)");
-            String fullPrompt = systemPrompt + "\n\n" + userPrompt;
-            return aiChatService.chatWithDocumentUrl(docFile.getFilePath(), fullPrompt);
+            log.info("[ReviewAgent] 检测到文档附件，使用文档分析模型 (qwen-long), ossId={}", docFile.getOssId());
+            try {
+                Resource resource = downloadFileAsResource(docFile);
+                String fullPrompt = systemPrompt + "\n\n" + userPrompt;
+                return aiChatService.chatWithDocument(resource, fullPrompt);
+            } catch (Exception e) {
+                log.error("[ReviewAgent] 文档文件下载或分析失败: {}", e.getMessage(), e);
+                throw new RuntimeException("文档审核失败: " + e.getMessage(), e);
+            }
         }
 
         log.info("[ReviewAgent] 无附件，使用文本模型 (qwen-plus)");
         return aiChatService.chat(systemPrompt, userPrompt);
     }
 
-    private String determineModel(List<ReviewTaskFile> files, ReviewPromptTemplate template) {
-        if (template.getModelName() != null && !template.getModelName().isBlank()) {
-            return template.getModelName();
+    private Resource downloadFileAsResource(ReviewTaskFile taskFile) {
+        if (taskFile.getOssId() != null) {
+            SysOssVo ossVo = TenantHelper.ignore(() -> ossService.getById(taskFile.getOssId()));
+            if (ossVo != null) {
+                OssClient storage = OssFactory.instance(ossVo.getService());
+                Path tempFile = storage.fileDownload(ossVo.getFileName());
+                log.info("[ReviewAgent] 文件已下载到临时路径: {}", tempFile);
+                return new FileSystemResource(tempFile.toFile());
+            }
         }
+        throw new RuntimeException("无法下载文件: ossId=" + taskFile.getOssId() + ", fileName=" + taskFile.getFileName());
+    }
+
+    private String determineModel(List<ReviewTaskFile> files, ReviewPromptTemplate template) {
         boolean hasImage = files.stream().anyMatch(f -> isImageFile(f.getFileType()));
         if (hasImage) return "qwen3-vl-plus";
         boolean hasDoc = files.stream().anyMatch(f -> isDocumentFile(f.getFileType()));
         if (hasDoc) return "qwen-long";
+        if (template.getModelName() != null && !template.getModelName().isBlank()) {
+            return template.getModelName();
+        }
         return "qwen-plus";
     }
 
@@ -255,19 +299,25 @@ public class ReviewAgent {
             JSONObject item = items.getJSONObject(i);
             ReviewResultItem resultItem = new ReviewResultItem();
             resultItem.setTaskId(task.getId());
+            resultItem.setSortOrder(i + 1);
+            resultItem.setMisjudged("0");
+            resultItem.setRawData(item.toJSONString());
+
+            // 通用字段提取（尽力提取，提取不到留空）
+            resultItem.setSeverity(item.getString("severity"));
+            resultItem.setDescription(item.getString("description"));
+            resultItem.setSuggestion(item.getString("suggestion"));
+            resultItem.setConfidence(item.getBigDecimal("confidence"));
+            resultItem.setLocation(item.getString("location"));
+            resultItem.setMatchStatus(item.getString("match_status"));
+
+            // 比对类场景字段（公司审核等）
             resultItem.setFieldName(item.getString("field_name"));
             resultItem.setFieldLabel(item.getString("field_label"));
             resultItem.setFormValue(item.getString("form_value"));
             resultItem.setExtractedValue(item.getString("extracted_value"));
-            resultItem.setMatchStatus(item.getString("match_status"));
-            resultItem.setConfidence(item.getBigDecimal("confidence"));
-            resultItem.setSeverity(item.getString("severity"));
-            resultItem.setDescription(item.getString("description"));
-            resultItem.setSuggestion(item.getString("suggestion"));
-            resultItem.setLocation(item.getString("location"));
-            resultItem.setMisjudged("0");
-            resultItem.setSortOrder(i + 1);
 
+            // 规则命中关联
             String fieldName = resultItem.getFieldName();
             if (fieldName != null) {
                 rules.stream()
@@ -284,13 +334,15 @@ public class ReviewAgent {
         }
     }
 
-    private void updateTaskStatus(ReviewTask task, JSONObject result, long duration, int totalRules, String modelUsed) {
+    private void updateTaskStatus(ReviewTask task, JSONObject result, long duration, int totalRules, String modelUsed, String aiResponse) {
         task.setStatus("completed");
-        task.setPassStatus(result.getString("pass_status"));
+        task.setPassStatus(mapPassStatus(result.getString("pass_status")));
         task.setScore(result.getInteger("score"));
         task.setAiModel(modelUsed);
         task.setReviewDuration(duration);
         task.setAiSummary(result.getString("summary"));
+        task.setResultJson(aiResponse);
+        task.setResultMarkdown(result.getString("detail_markdown"));
         task.setTotalRules(totalRules);
 
         JSONArray items = result.getJSONArray("items");
@@ -330,6 +382,43 @@ public class ReviewAgent {
         }
     }
 
+    // ==================== 知识库沉淀 ====================
+
+    private void saveToKnowledgeCase(ReviewTask task, List<Long> standardIds) {
+        try {
+            if (standardIds.isEmpty()) return;
+            List<ReviewStandardKnowledge> skList = standardKnowledgeMapper.selectList(
+                Wrappers.<ReviewStandardKnowledge>lambdaQuery().in(ReviewStandardKnowledge::getStandardId, standardIds)
+            );
+            if (skList.isEmpty()) return;
+
+            List<Long> knowledgeIds = skList.stream()
+                .map(ReviewStandardKnowledge::getKnowledgeId)
+                .distinct()
+                .collect(Collectors.toList());
+
+            for (Long knowledgeId : knowledgeIds) {
+                ReviewKnowledgeCase kcase = new ReviewKnowledgeCase();
+                kcase.setKnowledgeId(knowledgeId);
+                kcase.setTitle(task.getTaskName());
+                kcase.setCaseType("pass".equals(task.getPassStatus()) ? "positive" : "negative");
+                kcase.setScenario(task.getFormSnapshot() != null && task.getFormSnapshot().length() > 200
+                    ? task.getFormSnapshot().substring(0, 200) + "..."
+                    : task.getFormSnapshot());
+                kcase.setFormData(task.getFormSnapshot());
+                kcase.setReviewConclusion(task.getAiSummary());
+                kcase.setKeyPoint(task.getAiSummary() != null && task.getAiSummary().length() > 100
+                    ? task.getAiSummary().substring(0, 100)
+                    : task.getAiSummary());
+                knowledgeCaseMapper.insert(kcase);
+            }
+
+            log.info("[ReviewAgent] 审核案例已写入 {} 个知识库", knowledgeIds.size());
+        } catch (Exception e) {
+            log.warn("[ReviewAgent] 写入知识库案例失败（不影响审核结果）: {}", e.getMessage());
+        }
+    }
+
     // ==================== 文件类型判断 ====================
 
     private boolean isImageFile(String fileType) {
@@ -344,5 +433,15 @@ public class ReviewAgent {
         String lower = fileType.toLowerCase();
         return lower.equals("pdf") || lower.equals("docx") || lower.equals("doc")
             || lower.equals("xlsx") || lower.equals("xls") || lower.equals("txt");
+    }
+
+    private String mapPassStatus(String aiPassStatus) {
+        if (aiPassStatus == null) return "pending";
+        return switch (aiPassStatus) {
+            case "passed" -> "pass";
+            case "rejected" -> "fail";
+            case "need_review" -> "pending";
+            default -> "pending";
+        };
     }
 }

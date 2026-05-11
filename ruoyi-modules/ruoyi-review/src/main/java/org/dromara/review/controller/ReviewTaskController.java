@@ -14,6 +14,7 @@ import org.dromara.common.mybatis.core.page.PageQuery;
 import org.dromara.common.mybatis.core.page.TableDataInfo;
 import org.dromara.common.web.core.BaseController;
 import org.dromara.review.domain.bo.ReviewTaskBo;
+import org.dromara.review.domain.vo.ReviewResultItemVo;
 import org.dromara.review.domain.vo.ReviewTaskVo;
 import org.dromara.review.service.IReviewTaskService;
 import org.springframework.validation.annotation.Validated;
@@ -106,5 +107,16 @@ public class ReviewTaskController extends BaseController {
     @DeleteMapping("/{ids}")
     public R<Void> remove(@NotEmpty(message = "主键不能为空") @PathVariable Long[] ids) {
         return toAjax(reviewTaskService.deleteWithValidByIds(List.of(ids), true));
+    }
+
+    /**
+     * 查询任务的审核结果明细列表
+     *
+     * @param id 任务ID
+     */
+    @SaCheckPermission("review:task:query")
+    @GetMapping("/{id}/results")
+    public R<List<ReviewResultItemVo>> listResults(@NotNull(message = "任务ID不能为空") @PathVariable Long id) {
+        return R.ok(reviewTaskService.queryResultItems(id));
     }
 }

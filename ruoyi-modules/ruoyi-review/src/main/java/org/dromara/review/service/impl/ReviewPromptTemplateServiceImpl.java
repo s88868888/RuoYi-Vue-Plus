@@ -55,10 +55,13 @@ public class ReviewPromptTemplateServiceImpl implements IReviewPromptTemplateSer
     @Override
     @Transactional(rollbackFor = Exception.class)
     public Boolean insertByBo(ReviewPromptTemplateBo bo) {
+        checkTypeUnique(bo.getType(), null);
         ReviewPromptTemplate add = MapstructUtils.convert(bo, ReviewPromptTemplate.class);
         boolean flag = baseMapper.insert(add) > 0;
         if (flag) {
-            bo.setId(add.getId());
+            if (add != null) {
+                bo.setId(add.getId());
+            }
         }
         return flag;
     }
@@ -69,6 +72,7 @@ public class ReviewPromptTemplateServiceImpl implements IReviewPromptTemplateSer
     @Override
     @Transactional(rollbackFor = Exception.class)
     public Boolean updateByBo(ReviewPromptTemplateBo bo) {
+        checkTypeUnique(bo.getType(), bo.getId());
         ReviewPromptTemplate update = MapstructUtils.convert(bo, ReviewPromptTemplate.class);
         return baseMapper.updateById(update) > 0;
     }
@@ -80,6 +84,18 @@ public class ReviewPromptTemplateServiceImpl implements IReviewPromptTemplateSer
     @Transactional(rollbackFor = Exception.class)
     public Boolean deleteWithValidByIds(Collection<Long> ids, Boolean isValid) {
         return baseMapper.deleteByIds(ids) > 0;
+    }
+
+    private void checkTypeUnique(String type, Long excludeId) {
+        if (StringUtils.isBlank(type)) {
+            return;
+        }
+        LambdaQueryWrapper<ReviewPromptTemplate> lqw = Wrappers.lambdaQuery();
+        lqw.eq(ReviewPromptTemplate::getType, type);
+        lqw.ne(excludeId != null, ReviewPromptTemplate::getId, excludeId);
+        if (baseMapper.exists(lqw)) {
+            throw new RuntimeException("类型编码【" + type + "】已存在，请使用其他编码");
+        }
     }
 
 }

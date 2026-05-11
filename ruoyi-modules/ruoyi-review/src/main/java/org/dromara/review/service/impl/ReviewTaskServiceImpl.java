@@ -16,6 +16,7 @@ import org.dromara.review.domain.ReviewTask;
 import org.dromara.review.domain.ReviewTaskFile;
 import org.dromara.review.domain.ReviewTaskStandard;
 import org.dromara.review.domain.bo.ReviewTaskBo;
+import org.dromara.review.domain.vo.ReviewResultItemVo;
 import org.dromara.review.domain.vo.ReviewTaskVo;
 import org.dromara.review.agent.ReviewAgent;
 import org.dromara.review.domain.ReviewKnowledgeMisjudgment;
@@ -38,6 +39,8 @@ import org.springframework.transaction.annotation.Transactional;
 import java.util.Collection;
 import java.util.List;
 import java.util.stream.Collectors;
+import java.util.HashMap;
+import java.util.Map;
 
 /**
  * 审核任务Service业务层处理
@@ -84,7 +87,22 @@ public class ReviewTaskServiceImpl implements IReviewTaskService {
                 vo.setStandardNames(standardNames);
             }
 
-            // 附件列表通过单独接口获取，此处不设置
+            // 查询附件列表
+            List<ReviewTaskFile> files = reviewTaskFileMapper.selectList(
+                Wrappers.<ReviewTaskFile>lambdaQuery().eq(ReviewTaskFile::getTaskId, id)
+            );
+            if (CollUtil.isNotEmpty(files)) {
+                vo.setFiles(files.stream().map(f -> {
+                    ReviewTaskVo.ReviewTaskFileVo fv = new ReviewTaskVo.ReviewTaskFileVo();
+                    fv.setId(f.getId());
+                    fv.setOssId(f.getOssId());
+                    fv.setFileName(f.getFileName());
+                    fv.setFileType(f.getFileType());
+                    fv.setFilePath(f.getFilePath());
+                    fv.setFileSize(f.getFileSize());
+                    return fv;
+                }).collect(Collectors.toList()));
+            }
         }
         return vo;
     }
@@ -96,6 +114,34 @@ public class ReviewTaskServiceImpl implements IReviewTaskService {
     public TableDataInfo<ReviewTaskVo> queryPageList(ReviewTaskBo bo, PageQuery pageQuery) {
         LambdaQueryWrapper<ReviewTask> lqw = buildQueryWrapper(bo);
         Page<ReviewTaskVo> result = baseMapper.selectVoPage(pageQuery.build(), lqw);
+
+        // 批量填充 standardNames
+        List<ReviewTaskVo> records = result.getRecords();
+        if (CollUtil.isNotEmpty(records)) {
+            List<Long> taskIds = records.stream().map(ReviewTaskVo::getId).collect(Collectors.toList());
+            List<ReviewTaskStandard> allTs = reviewTaskStandardMapper.selectList(
+                Wrappers.<ReviewTaskStandard>lambdaQuery().in(ReviewTaskStandard::getTaskId, taskIds)
+            );
+            // 收集所有标准ID
+            List<Long> allStandardIds = allTs.stream().map(ReviewTaskStandard::getStandardId).distinct().collect(Collectors.toList());
+            Map<Long, String> standardNameMap = new HashMap<>();
+            if (CollUtil.isNotEmpty(allStandardIds)) {
+                List<ReviewStandard> standards = reviewStandardMapper.selectByIds(allStandardIds);
+                standardNameMap = standards.stream().collect(Collectors.toMap(ReviewStandard::getId, ReviewStandard::getName, (a, b) -> a));
+            }
+            // 按 taskId 分组
+            Map<Long, List<ReviewTaskStandard>> tsMap = allTs.stream().collect(Collectors.groupingBy(ReviewTaskStandard::getTaskId));
+            Map<Long, String> finalStandardNameMap = standardNameMap;
+            for (ReviewTaskVo vo : records) {
+                List<ReviewTaskStandard> tsList = tsMap.getOrDefault(vo.getId(), List.of());
+                String names = tsList.stream()
+                    .map(ts -> finalStandardNameMap.getOrDefault(ts.getStandardId(), ""))
+                    .filter(n -> !n.isEmpty())
+                    .collect(Collectors.joining(", "));
+                vo.setStandardNames(names);
+            }
+        }
+
         return TableDataInfo.build(result);
     }
 
@@ -117,6 +163,7 @@ public class ReviewTaskServiceImpl implements IReviewTaskService {
     public Long createTask(ReviewTaskBo bo) {
         // 1. 插入审核任务
         ReviewTask task = BeanUtil.toBean(bo, ReviewTask.class);
+        task.setFormSnapshot(bo.getFormSnapshot());
         baseMapper.insert(task);
 
         // 2. 遍历标准ID列表插入关联关系
@@ -130,7 +177,23 @@ public class ReviewTaskServiceImpl implements IReviewTaskService {
             }
         }
 
-        // 3. 返回任务ID
+        // 3. 保存附件
+        if (CollUtil.isNotEmpty(bo.getFiles())) {
+            int sortOrder = 1;
+            for (ReviewTaskBo.TaskFileBo fileBo : bo.getFiles()) {
+                ReviewTaskFile taskFile = new ReviewTaskFile();
+                taskFile.setTaskId(task.getId());
+                taskFile.setOssId(fileBo.getOssId());
+                taskFile.setFileName(fileBo.getFileName());
+                taskFile.setFileType(fileBo.getFileType());
+                taskFile.setFilePath(fileBo.getFilePath());
+                taskFile.setFileSize(fileBo.getFileSize());
+                taskFile.setSortOrder(sortOrder++);
+                reviewTaskFileMapper.insert(taskFile);
+            }
+        }
+
+        // 4. 返回任务ID
         return task.getId();
     }
 
@@ -258,6 +321,15 @@ public class ReviewTaskServiceImpl implements IReviewTaskService {
             Wrappers.<ReviewStandardKnowledge>lambdaQuery().eq(ReviewStandardKnowledge::getStandardId, standardId).last("LIMIT 1")
         );
         return skList.isEmpty() ? null : skList.get(0).getKnowledgeId();
+    }
+
+    @Override
+    public List<ReviewResultItemVo> queryResultItems(Long taskId) {
+        return reviewResultItemMapper.selectVoList(
+            Wrappers.<ReviewResultItem>lambdaQuery()
+                .eq(ReviewResultItem::getTaskId, taskId)
+                .orderByAsc(ReviewResultItem::getSortOrder)
+        );
     }
 
 }

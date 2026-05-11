@@ -114,4 +114,9 @@ public class ReviewResultItem extends TenantEntity {
      */
     private Integer sortOrder;
 
+    /**
+     * 原始JSON数据（存储AI返回的单条item完整内容）
+     */
+    private String rawData;
+
 }

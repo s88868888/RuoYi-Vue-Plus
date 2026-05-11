@@ -94,6 +94,16 @@ public class ReviewTask extends TenantEntity {
     private String aiSummary;
 
     /**
+     * AI完整响应JSON
+     */
+    private String resultJson;
+
+    /**
+     * AI审核报告Markdown
+     */
+    private String resultMarkdown;
+
+    /**
      * 总规则数
      */
     private Integer totalRules;

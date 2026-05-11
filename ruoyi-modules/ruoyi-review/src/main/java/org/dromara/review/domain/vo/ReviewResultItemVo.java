@@ -129,4 +129,9 @@ public class ReviewResultItemVo implements Serializable {
      */
     private Integer sortOrder;
 
+    /**
+     * 原始JSON数据
+     */
+    private String rawData;
+
 }

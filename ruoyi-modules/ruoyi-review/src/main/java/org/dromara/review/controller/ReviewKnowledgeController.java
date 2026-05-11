@@ -20,6 +20,7 @@ import org.dromara.review.domain.bo.ReviewKnowledgeBo;
 import org.dromara.review.domain.vo.ReviewKnowledgeVo;
 import org.dromara.review.domain.vo.ReviewStandardVo;
 import org.dromara.review.service.IReviewKnowledgeService;
+import org.dromara.review.service.ReviewRagService;
 import org.springframework.validation.annotation.Validated;
 import org.springframework.web.bind.annotation.*;
 
@@ -37,6 +38,7 @@ import java.util.List;
 public class ReviewKnowledgeController extends BaseController {
 
     private final IReviewKnowledgeService reviewKnowledgeService;
+    private final ReviewRagService reviewRagService;
 
     /**
      * 分页查询知识库列表
@@ -128,5 +130,16 @@ public class ReviewKnowledgeController extends BaseController {
     @GetMapping("/{knowledgeId}/misjudgments")
     public R<List<ReviewKnowledgeMisjudgment>> listMisjudgments(@NotNull(message = "知识库ID不能为空") @PathVariable Long knowledgeId) {
         return R.ok(reviewKnowledgeService.queryMisjudgments(knowledgeId));
+    }
+
+    /**
+     * 同步知识库到向量库（Milvus）
+     */
+    @SaCheckPermission("review:knowledge:edit")
+    @Log(title = "同步知识库到向量库", businessType = BusinessType.UPDATE)
+    @PostMapping("/{knowledgeId}/sync-vector")
+    public R<Void> syncToVector(@NotNull(message = "知识库ID不能为空") @PathVariable Long knowledgeId) {
+        reviewRagService.syncKnowledgeToVector(knowledgeId);
+        return R.ok();
     }
 }

@@ -317,6 +317,107 @@ public class ReviewRagService {
 
     // ==================== 工具方法 ====================
 
+    /**
+     * 同步整个知识库到向量库（Milvus）
+     * 将案例、模式、误判记录全部向量化
+     */
+    @Async
+    public void syncKnowledgeToVector(Long knowledgeId) {
+        String collectionName = getCollectionName(knowledgeId);
+        log.info("[RAG] 开始同步知识库到向量库: knowledgeId={}, collection={}", knowledgeId, collectionName);
+
+        // 确保 collection 存在
+        try {
+            ReviewKnowledge knowledge = knowledgeMapper.selectById(knowledgeId);
+            String desc = "审核知识库向量集合" + (knowledge != null ? " - " + knowledge.getName() : "");
+            vectorStoreService.createCollection(collectionName, desc);
+        } catch (Exception e) {
+            log.error("[RAG] 创建collection失败: {}", e.getMessage());
+            return;
+        }
+
+        int totalCount = 0;
+
+        // 同步案例
+        List<ReviewKnowledgeCase> cases = knowledgeCaseMapper.selectList(
+            Wrappers.<ReviewKnowledgeCase>lambdaQuery().eq(ReviewKnowledgeCase::getKnowledgeId, knowledgeId)
+        );
+        for (ReviewKnowledgeCase kcase : cases) {
+            try {
+                String content = buildCaseText(kcase);
+                VectorDocument doc = VectorDocument.builder()
+                    .id("case_" + kcase.getId())
+                    .tenantId(getTenantId(knowledgeId))
+                    .companyId(0L)
+                    .docType("case")
+                    .content(content)
+                    .metadata(Map.of("case_id", kcase.getId(), "case_type", kcase.getCaseType(), "title", kcase.getTitle()))
+                    .createTime(System.currentTimeMillis())
+                    .build();
+                vectorStoreService.insertDocument(collectionName, doc);
+                totalCount++;
+            } catch (Exception e) {
+                log.warn("[RAG] 案例向量化失败: caseId={}, error={}", kcase.getId(), e.getMessage());
+            }
+        }
+
+        // 同步问题模式
+        List<ReviewKnowledgePattern> patterns = knowledgePatternMapper.selectList(
+            Wrappers.<ReviewKnowledgePattern>lambdaQuery().eq(ReviewKnowledgePattern::getKnowledgeId, knowledgeId)
+        );
+        for (ReviewKnowledgePattern pattern : patterns) {
+            try {
+                String content = "问题模式: " + pattern.getPatternName()
+                    + "\n描述: " + (pattern.getDescription() != null ? pattern.getDescription() : "")
+                    + "\n处理建议: " + (pattern.getSolution() != null ? pattern.getSolution() : "");
+                VectorDocument doc = VectorDocument.builder()
+                    .id("pattern_" + pattern.getId())
+                    .tenantId(getTenantId(knowledgeId))
+                    .companyId(0L)
+                    .docType("pattern")
+                    .content(content)
+                    .metadata(Map.of("pattern_id", pattern.getId(), "frequency", pattern.getFrequency()))
+                    .createTime(System.currentTimeMillis())
+                    .build();
+                vectorStoreService.insertDocument(collectionName, doc);
+                totalCount++;
+            } catch (Exception e) {
+                log.warn("[RAG] 模式向量化失败: patternId={}, error={}", pattern.getId(), e.getMessage());
+            }
+        }
+
+        // 同步误判记录
+        List<ReviewKnowledgeMisjudgment> misjudgments = misjudgmentMapper.selectList(
+            Wrappers.<ReviewKnowledgeMisjudgment>lambdaQuery().eq(ReviewKnowledgeMisjudgment::getKnowledgeId, knowledgeId)
+        );
+        for (ReviewKnowledgeMisjudgment mj : misjudgments) {
+            try {
+                String content = "误判纠正记录"
+                    + "\n字段: " + (mj.getFieldName() != null ? mj.getFieldName() : "")
+                    + "\nAI原始判断: " + (mj.getAiJudgment() != null ? mj.getAiJudgment() : "")
+                    + "\n人工纠正为: " + (mj.getCorrectJudgment() != null ? mj.getCorrectJudgment() : "")
+                    + "\n原因: " + (mj.getReason() != null ? mj.getReason() : "");
+                VectorDocument doc = VectorDocument.builder()
+                    .id("misjudgment_" + mj.getId())
+                    .tenantId(getTenantId(knowledgeId))
+                    .companyId(0L)
+                    .docType("misjudgment")
+                    .content(content)
+                    .metadata(Map.of("misjudgment_id", mj.getId(), "field_name", mj.getFieldName() != null ? mj.getFieldName() : ""))
+                    .createTime(System.currentTimeMillis())
+                    .build();
+                vectorStoreService.insertDocument(collectionName, doc);
+                mj.setIsLearned("1");
+                misjudgmentMapper.updateById(mj);
+                totalCount++;
+            } catch (Exception e) {
+                log.warn("[RAG] 误判向量化失败: mjId={}, error={}", mj.getId(), e.getMessage());
+            }
+        }
+
+        log.info("[RAG] 知识库同步完成: knowledgeId={}, 共同步 {} 条记录", knowledgeId, totalCount);
+    }
+
     private List<Long> getKnowledgeIds(List<Long> standardIds) {
         if (standardIds.isEmpty()) return List.of();
         List<ReviewStandardKnowledge> skList = standardKnowledgeMapper.selectList(

@@ -69,15 +69,33 @@ public class AiChatService {
                          ChatClient.Builder chatClientBuilder,
                          @Value("${spring.ai.dashscope.api-key}") String apiKey,
                          @Value("${spring.ai.dashscope.base-url:}") String baseUrl,
-                         @Value("${spring.ai.dashscope.multimodal-completions-path:/api/v1/services/aigc/multimodal-generation/generation}") String multiModalCompletionsPath) {
+                         @Value("${spring.ai.dashscope.multimodal-completions-path:/api/v1/services/aigc/multimodal-generation/generation}") String multiModalCompletionsPath,
+                         @Value("${spring.ai.dashscope.http-client.read-timeout:300000}") int aiReadTimeout) {
         this.embeddingModel = embeddingModel;
         this.documentAdvisor = new DashScopeDocumentAnalysisAdvisor(new SimpleApiKey(apiKey));
         // 不注册为 defaultAdvisors，避免普通 chat 请求触发文档解析导致 URL 错误
         this.chatClient = chatClientBuilder.build();
 
+        // 构建带超时配置的 RestClient，避免 multimodal 请求被 Jetty 默认超时中断
+        // 需要同时设置 total timeout (setReadTimeout) 和 idle timeout (HttpClient.setIdleTimeout)
+        org.eclipse.jetty.client.HttpClient jettyHttpClient = new org.eclipse.jetty.client.HttpClient();
+        jettyHttpClient.setIdleTimeout(aiReadTimeout);  // 空闲超时（默认30s）
+        jettyHttpClient.setConnectTimeout(30000);       // 连接超时
+        try {
+            jettyHttpClient.start();
+        } catch (Exception e) {
+            throw new RuntimeException("启动 Jetty HttpClient 失败", e);
+        }
+        org.springframework.http.client.JettyClientHttpRequestFactory jettyFactory =
+            new org.springframework.http.client.JettyClientHttpRequestFactory(jettyHttpClient);
+        jettyFactory.setReadTimeout(java.time.Duration.ofMillis(aiReadTimeout));
+        org.springframework.web.client.RestClient.Builder multiModalRestClientBuilder =
+            org.springframework.web.client.RestClient.builder().requestFactory(jettyFactory);
+
         DashScopeApi.Builder dashScopeApiBuilder = DashScopeApi.builder()
             .apiKey(apiKey)
-            .completionsPath(multiModalCompletionsPath);
+            .completionsPath(multiModalCompletionsPath)
+            .restClientBuilder(multiModalRestClientBuilder);
         if (baseUrl != null && !baseUrl.isBlank()) {
             dashScopeApiBuilder.baseUrl(baseUrl);
         }
@@ -307,6 +325,28 @@ public class AiChatService {
             });
         } catch (Exception e) {
             log.error("[chatWithImage] 带系统提示词的图片分析失败, imageUrl={}", imageUrl, e);
+            throw e;
+        }
+    }
+
+    /**
+     * 带系统提示词的图片理解分析 - 通过 Resource 传递图片（支持内网文件）
+     *
+     * @param systemPrompt  系统提示词
+     * @param imageResource 图片资源（如 ByteArrayResource）
+     * @param userPrompt    用户提示词
+     * @return AI 回复
+     */
+    public String chatWithImage(String systemPrompt, Resource imageResource, String userPrompt) {
+        try {
+            return callWithRetry(() -> multiModalChatClient.prompt()
+                .system(systemPrompt)
+                .user(u -> u.text(userPrompt).media(MimeTypeUtils.IMAGE_PNG, imageResource))
+                .options(VISION_OPTIONS)
+                .call()
+                .content());
+        } catch (Exception e) {
+            log.error("[chatWithImage] 通过Resource的图片分析失败", e);
             throw e;
         }
     }
