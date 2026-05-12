@@ -55,6 +55,7 @@ public class ReviewAgent {
     private final ReviewKnowledgeCaseMapper knowledgeCaseMapper;
     private final ReviewStandardKnowledgeMapper standardKnowledgeMapper;
     private final ReviewKnowledgePatternMapper knowledgePatternMapper;
+    private final ReviewKnowledgeMapper knowledgeMapper;
 
     @Transactional(rollbackFor = Exception.class)
     public void execute(Long taskId) {
@@ -665,6 +666,30 @@ public class ReviewAgent {
                     pattern.setSolution(item.getSuggestion());
                     knowledgePatternMapper.insert(pattern);
                     log.info("[ReviewAgent] 新增问题模式: {} (频次:{}, 准确率:{}%)", patternName, historyCount, accuracy);
+                }
+            }
+
+            // 回写每个知识库的整体准确率（所有模式的频次加权平均，仅取 accuracy > 0 的模式）
+            for (Long knowledgeId : new java.util.HashSet<>(standardToKnowledge.values())) {
+                List<ReviewKnowledgePattern> patterns = knowledgePatternMapper.selectList(
+                    Wrappers.<ReviewKnowledgePattern>lambdaQuery()
+                        .eq(ReviewKnowledgePattern::getKnowledgeId, knowledgeId)
+                        .gt(ReviewKnowledgePattern::getAccuracy, java.math.BigDecimal.ZERO)
+                );
+                if (!patterns.isEmpty()) {
+                    double weightedSum = patterns.stream()
+                        .mapToDouble(p -> p.getAccuracy().doubleValue() * (p.getFrequency() == null ? 1 : p.getFrequency()))
+                        .sum();
+                    double totalFreq = patterns.stream()
+                        .mapToDouble(p -> p.getFrequency() == null ? 1 : p.getFrequency())
+                        .sum();
+                    java.math.BigDecimal knowledgeAccuracy = java.math.BigDecimal.valueOf(weightedSum / totalFreq)
+                        .setScale(2, java.math.RoundingMode.HALF_UP);
+                    ReviewKnowledge kb = new ReviewKnowledge();
+                    kb.setId(knowledgeId);
+                    kb.setAccuracy(knowledgeAccuracy);
+                    knowledgeMapper.updateById(kb);
+                    log.info("[ReviewAgent] 知识库 {} 准确率更新为 {}%", knowledgeId, knowledgeAccuracy);
                 }
             }
         } catch (Exception e) {
