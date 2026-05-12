@@ -369,6 +369,22 @@ public class AiChatService {
     }
 
     /**
+     * 带系统提示词的文档分析（qwen-long-latest）
+     * <p>
+     * 将 system/user 指令分离，规则抽取等任务更稳定。
+     */
+    public String chatWithDocument(String systemPrompt, Resource resource, String userMessage) {
+        return callWithRetry(() -> chatClient.prompt()
+            .advisors(documentAdvisor)
+            .advisors(a -> a.param(DashScopeDocumentAnalysisAdvisor.RESOURCE, resource))
+            .system(systemPrompt)
+            .user(userMessage)
+            .options(DOC_OPTIONS)
+            .call()
+            .content());
+    }
+
+    /**
      * 通过 URL 传递文件进行分析
      *
      * @param url         文件 URL

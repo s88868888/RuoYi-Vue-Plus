@@ -106,4 +106,30 @@ public class ReviewStandardRuleServiceImpl implements IReviewStandardRuleService
         return baseMapper.deleteByIds(ids) > 0;
     }
 
+    @Override
+    @Transactional(rollbackFor = Exception.class)
+    public int batchInsert(Long standardId, List<ReviewStandardRuleBo> rules) {
+        if (rules == null || rules.isEmpty()) return 0;
+        int max = baseMapper.selectCount(
+            com.baomidou.mybatisplus.core.toolkit.Wrappers.<ReviewStandardRule>lambdaQuery()
+                .eq(ReviewStandardRule::getStandardId, standardId)
+        ).intValue();
+        int count = 0;
+        for (ReviewStandardRuleBo bo : rules) {
+            bo.setStandardId(standardId);
+            ReviewStandardRule entity = MapstructUtils.convert(bo, ReviewStandardRule.class);
+            if (entity.getSortOrder() == null) {
+                entity.setSortOrder(++max);
+            }
+            if (entity.getWeight() == null) {
+                entity.setWeight(10);
+            }
+            if (entity.getStatus() == null) {
+                entity.setStatus("0");
+            }
+            count += baseMapper.insert(entity);
+        }
+        return count;
+    }
+
 }

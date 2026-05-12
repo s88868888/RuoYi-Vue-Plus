@@ -67,6 +67,7 @@ public class ReviewStandardServiceImpl implements IReviewStandardService {
                     .eq(ReviewStandardRule::getStandardId, id)
                     .orderByAsc(ReviewStandardRule::getSortOrder)
             );
+            vo.setRuleCount(rules.size());
             log.debug("标准[{}]关联规则数: {}", id, rules.size());
 
             // 查询关联的知识库列表
@@ -86,7 +87,22 @@ public class ReviewStandardServiceImpl implements IReviewStandardService {
     public TableDataInfo<ReviewStandardVo> queryPageList(ReviewStandardBo bo, PageQuery pageQuery) {
         LambdaQueryWrapper<ReviewStandard> lqw = buildQueryWrapper(bo);
         Page<ReviewStandardVo> result = baseMapper.selectVoPage(pageQuery.build(), lqw);
+        fillRuleCount(result.getRecords());
         return TableDataInfo.build(result);
+    }
+
+    private void fillRuleCount(List<ReviewStandardVo> rows) {
+        if (CollUtil.isEmpty(rows)) return;
+        List<Long> ids = rows.stream().map(ReviewStandardVo::getId).toList();
+        java.util.Map<Long, Long> countMap = reviewStandardRuleMapper.selectList(
+                Wrappers.<ReviewStandardRule>lambdaQuery()
+                    .select(ReviewStandardRule::getStandardId)
+                    .in(ReviewStandardRule::getStandardId, ids)
+            ).stream()
+            .collect(Collectors.groupingBy(ReviewStandardRule::getStandardId, Collectors.counting()));
+        for (ReviewStandardVo vo : rows) {
+            vo.setRuleCount(countMap.getOrDefault(vo.getId(), 0L).intValue());
+        }
     }
 
     private LambdaQueryWrapper<ReviewStandard> buildQueryWrapper(ReviewStandardBo bo) {
@@ -110,6 +126,15 @@ public class ReviewStandardServiceImpl implements IReviewStandardService {
         bo.setCreateTime(new Date());
         bo.setUpdateBy(LoginHelper.getUserId());
         bo.setUpdateTime(new Date());
+        if (bo.getType() == null || bo.getType().isBlank()) {
+            bo.setType("general");
+        }
+        if (bo.getStatus() == null || bo.getStatus().isBlank()) {
+            bo.setStatus("0");
+        }
+        if (bo.getVersion() == null || bo.getVersion().isBlank()) {
+            bo.setVersion("v1.0");
+        }
         ReviewStandard add = MapstructUtils.convert(bo, ReviewStandard.class);
         boolean flag = baseMapper.insert(add) > 0;
         if (flag) {

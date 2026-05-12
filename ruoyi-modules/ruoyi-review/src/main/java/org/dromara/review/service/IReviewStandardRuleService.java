@@ -46,4 +46,9 @@ public interface IReviewStandardRuleService {
      */
     Boolean deleteWithValidByIds(Collection<Long> ids, Boolean isValid);
 
+    /**
+     * 批量插入规则（用于 AI 抽取 / 模板导入确认后落库）
+     */
+    int batchInsert(Long standardId, List<ReviewStandardRuleBo> rules);
+
 }

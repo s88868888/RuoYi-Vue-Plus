@@ -1,6 +1,7 @@
 package org.dromara.review.controller;
 
 import cn.dev33.satoken.annotation.SaCheckPermission;
+import jakarta.servlet.http.HttpServletResponse;
 import jakarta.validation.constraints.NotEmpty;
 import jakarta.validation.constraints.NotNull;
 import lombok.RequiredArgsConstructor;
@@ -15,14 +16,19 @@ import org.dromara.common.mybatis.core.page.TableDataInfo;
 import org.dromara.common.web.core.BaseController;
 import org.dromara.review.domain.bo.ReviewStandardBo;
 import org.dromara.review.domain.bo.ReviewStandardRuleBo;
+import org.dromara.review.domain.vo.ParsedRuleVo;
 import org.dromara.review.domain.vo.ReviewKnowledgeVo;
+import org.dromara.review.domain.vo.ReviewStandardRuleExportVo;
 import org.dromara.review.domain.vo.ReviewStandardRuleVo;
 import org.dromara.review.domain.vo.ReviewStandardVo;
 import org.dromara.review.service.IReviewStandardRuleService;
 import org.dromara.review.service.IReviewStandardService;
+import org.dromara.review.service.ReviewStandardParseService;
 import org.springframework.validation.annotation.Validated;
 import org.springframework.web.bind.annotation.*;
+import org.springframework.web.multipart.MultipartFile;
 
+import java.io.IOException;
 import java.util.List;
 
 /**
@@ -38,6 +44,7 @@ public class ReviewStandardController extends BaseController {
 
     private final IReviewStandardService reviewStandardService;
     private final IReviewStandardRuleService reviewStandardRuleService;
+    private final ReviewStandardParseService reviewStandardParseService;
 
     /**
      * 分页查询标准列表
@@ -66,8 +73,9 @@ public class ReviewStandardController extends BaseController {
     @Log(title = "审核标准", businessType = BusinessType.INSERT)
     @RepeatSubmit()
     @PostMapping()
-    public R<Void> add(@Validated(AddGroup.class) @RequestBody ReviewStandardBo bo) {
-        return toAjax(reviewStandardService.insertByBo(bo));
+    public R<Long> add(@Validated(AddGroup.class) @RequestBody ReviewStandardBo bo) {
+        reviewStandardService.insertByBo(bo);
+        return R.ok(bo.getId());
     }
 
     /**
@@ -173,5 +181,63 @@ public class ReviewStandardController extends BaseController {
     @DeleteMapping("/rule/{ids}")
     public R<Void> removeRule(@NotEmpty(message = "主键不能为空") @PathVariable Long[] ids) {
         return toAjax(reviewStandardRuleService.deleteWithValidByIds(List.of(ids), true));
+    }
+
+    /**
+     * 导出标准下的规则列表（xlsx）
+     */
+    @SaCheckPermission("review:standard:query")
+    @PostMapping("/{standardId}/rules/export")
+    public void exportRules(@NotNull @PathVariable Long standardId, HttpServletResponse response) {
+        List<ReviewStandardRuleVo> list = reviewStandardRuleService.queryListByStandardId(standardId);
+        List<ReviewStandardRuleExportVo> exportList = list.stream().map(r -> {
+            ReviewStandardRuleExportVo vo = new ReviewStandardRuleExportVo();
+            vo.setContent(r.getContent());
+            vo.setSeverity(r.getSeverity());
+            vo.setCategory(r.getCategory());
+            vo.setWeight(r.getWeight());
+            return vo;
+        }).toList();
+        org.dromara.common.excel.utils.ExcelUtil.exportExcel(exportList, "规则列表", ReviewStandardRuleExportVo.class, response);
+    }
+
+    // ==================== 规则导入 / AI 抽取 ====================
+
+    /**
+     * 下载规则导入模板（xlsx）
+     */
+    @SaCheckPermission("review:standard:query")
+    @PostMapping("/rule/template")
+    public void downloadRuleTemplate(HttpServletResponse response) throws IOException {
+        reviewStandardParseService.downloadTemplate(response);
+    }
+
+    /**
+     * 上传文档（Word/PDF/TXT）调用 qwen-long 抽取规则，返回预览列表（不落库）
+     */
+    @SaCheckPermission("review:standard:edit")
+    @PostMapping("/rule/parse-document")
+    public R<List<ParsedRuleVo>> parseDocument(@NotNull(message = "ossId 不能为空") @RequestParam Long ossId) {
+        return R.ok(reviewStandardParseService.parseDocument(ossId));
+    }
+
+    /**
+     * 上传 Excel 模板解析规则，返回预览列表（不落库）
+     */
+    @SaCheckPermission("review:standard:edit")
+    @PostMapping("/rule/import-preview")
+    public R<List<ParsedRuleVo>> importTemplatePreview(@RequestParam("file") MultipartFile file) throws IOException {
+        return R.ok(reviewStandardParseService.importTemplate(file.getInputStream()));
+    }
+
+    /**
+     * 批量保存规则到指定标准（用户在前端确认编辑后调用）
+     */
+    @SaCheckPermission("review:standard:edit")
+    @Log(title = "审核标准规则批量导入", businessType = BusinessType.INSERT)
+    @PostMapping("/{standardId}/rules/batch")
+    public R<Integer> batchAddRules(@NotNull @PathVariable Long standardId,
+                                    @RequestBody List<ReviewStandardRuleBo> rules) {
+        return R.ok(reviewStandardRuleService.batchInsert(standardId, rules));
     }
 }
