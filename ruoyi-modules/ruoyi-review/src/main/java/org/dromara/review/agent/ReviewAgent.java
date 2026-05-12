@@ -616,28 +616,55 @@ public class ReviewAgent {
 
                 if (historyCount < 3) continue;
 
-                // 检查是否已存在该模式
-                String patternName = item.getFieldName() + "_" + (item.getSeverity() != null ? item.getSeverity() : "error");
+                // 准确率：同字段历史命中中非误判的占比
+                long totalHistory = resultItemMapper.selectCount(
+                    Wrappers.<ReviewResultItem>lambdaQuery()
+                        .eq(ReviewResultItem::getFieldName, item.getFieldName())
+                        .ne(ReviewResultItem::getMatchStatus, "matched")
+                );
+                java.math.BigDecimal accuracy = totalHistory > 0
+                    ? java.math.BigDecimal.valueOf(historyCount * 100.0 / totalHistory)
+                        .setScale(2, java.math.RoundingMode.HALF_UP)
+                    : java.math.BigDecimal.ZERO;
+
+                // 生成面向用户的模式名（优先用中文字段标签 + 中文严重度）
+                String severityLabel = mapSeverityLabel(item.getSeverity());
+                String fieldDisplay = (item.getFieldLabel() != null && !item.getFieldLabel().isBlank())
+                    ? item.getFieldLabel() : item.getFieldName();
+                String patternName = String.format("%s-%s", fieldDisplay, severityLabel);
+                // 旧数据兼容：同一 knowledgeId 下曾用 fieldName_severity 作为模式名
+                String legacyPatternName = item.getFieldName() + "_" + (item.getSeverity() != null ? item.getSeverity() : "error");
+
                 ReviewKnowledgePattern existing = knowledgePatternMapper.selectOne(
                     Wrappers.<ReviewKnowledgePattern>lambdaQuery()
                         .eq(ReviewKnowledgePattern::getKnowledgeId, knowledgeId)
-                        .eq(ReviewKnowledgePattern::getPatternName, patternName)
+                        .and(w -> w.eq(ReviewKnowledgePattern::getPatternName, patternName)
+                            .or().eq(ReviewKnowledgePattern::getPatternName, legacyPatternName))
+                        .last("LIMIT 1")
                 );
 
+                String description = String.format("字段「%s」频繁出现%s级别问题，已累计 %d 次",
+                    fieldDisplay, severityLabel, historyCount);
+
                 if (existing != null) {
+                    existing.setPatternName(patternName);
+                    existing.setDescription(description);
                     existing.setFrequency((int) historyCount);
+                    existing.setAccuracy(accuracy);
+                    if (existing.getSolution() == null || existing.getSolution().isBlank()) {
+                        existing.setSolution(item.getSuggestion());
+                    }
                     knowledgePatternMapper.updateById(existing);
                 } else {
                     ReviewKnowledgePattern pattern = new ReviewKnowledgePattern();
                     pattern.setKnowledgeId(knowledgeId);
                     pattern.setPatternName(patternName);
-                    pattern.setDescription(String.format("字段「%s」频繁出现%s级别问题，已累计 %d 次",
-                        item.getFieldLabel() != null ? item.getFieldLabel() : item.getFieldName(),
-                        item.getSeverity(), historyCount));
+                    pattern.setDescription(description);
                     pattern.setFrequency((int) historyCount);
+                    pattern.setAccuracy(accuracy);
                     pattern.setSolution(item.getSuggestion());
                     knowledgePatternMapper.insert(pattern);
-                    log.info("[ReviewAgent] 新增问题模式: {} (频次:{})", patternName, historyCount);
+                    log.info("[ReviewAgent] 新增问题模式: {} (频次:{}, 准确率:{}%)", patternName, historyCount, accuracy);
                 }
             }
         } catch (Exception e) {
@@ -668,6 +695,16 @@ public class ReviewAgent {
             case "rejected" -> "fail";
             case "need_review" -> "pending";
             default -> "pending";
+        };
+    }
+
+    private String mapSeverityLabel(String severity) {
+        if (severity == null) return "异常";
+        return switch (severity) {
+            case "error" -> "严重";
+            case "warning" -> "警告";
+            case "info" -> "提示";
+            default -> severity;
         };
     }
 }
