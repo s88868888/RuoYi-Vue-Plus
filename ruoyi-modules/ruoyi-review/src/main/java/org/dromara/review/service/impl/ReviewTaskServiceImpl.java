@@ -156,7 +156,7 @@ public class ReviewTaskServiceImpl implements IReviewTaskService {
     }
 
     /**
-     * 创建审核任务（含关联标准、保存附件）
+     * 创建审核任务（含关联标准、保存附件、自动触发AI审核）
      */
     @Override
     @Transactional(rollbackFor = Exception.class)
@@ -164,6 +164,16 @@ public class ReviewTaskServiceImpl implements IReviewTaskService {
         // 1. 插入审核任务
         ReviewTask task = BeanUtil.toBean(bo, ReviewTask.class);
         task.setFormSnapshot(bo.getFormSnapshot());
+
+        // 处理重新审核：设置parentTaskId并递增version
+        if (bo.getParentTaskId() != null) {
+            task.setParentTaskId(bo.getParentTaskId());
+            ReviewTask parentTask = baseMapper.selectById(bo.getParentTaskId());
+            if (parentTask != null) {
+                task.setVersion(parentTask.getVersion() + 1);
+            }
+        }
+
         baseMapper.insert(task);
 
         // 2. 遍历标准ID列表插入关联关系
@@ -193,7 +203,24 @@ public class ReviewTaskServiceImpl implements IReviewTaskService {
             }
         }
 
-        // 4. 返回任务ID
+        // 4. 外部系统创建（如商会系统）自动触发审核
+        //    用 afterCommit 钩子确保当前事务提交后才异步执行审核，避免事务可见性/死锁问题
+        if (StringUtils.isNotBlank(bo.getSourceType()) && !"manual".equals(bo.getSourceType())) {
+            final Long newTaskId = task.getId();
+            if (org.springframework.transaction.support.TransactionSynchronizationManager.isSynchronizationActive()) {
+                org.springframework.transaction.support.TransactionSynchronizationManager.registerSynchronization(
+                    new org.springframework.transaction.support.TransactionSynchronization() {
+                        @Override
+                        public void afterCommit() {
+                            executeReview(newTaskId);
+                        }
+                    }
+                );
+            } else {
+                executeReview(newTaskId);
+            }
+        }
+
         return task.getId();
     }
 

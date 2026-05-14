@@ -122,6 +122,9 @@ public class ReviewAgent {
             // 9. 聚合问题模式（同类问题出现≥3次自动归纳）
             aggregatePatterns(task, standardIds);
 
+            // 10. 回调外部系统
+           // callbackExternalSystem(task);
+
             log.info("[ReviewAgent] 审核完成: taskId={}, passStatus={}, score={}, model={}, 耗时={}ms",
                 taskId, task.getPassStatus(), task.getScore(), modelUsed, duration);
 
@@ -130,6 +133,8 @@ public class ReviewAgent {
             task.setStatus("failed");
             task.setAiSummary("审核执行异常: " + e.getMessage());
             taskMapper.updateById(task);
+            // 失败也回调
+            try { callbackExternalSystem(task); } catch (Exception ex) { log.warn("回调失败", ex); }
             throw e;
         }
     }
@@ -169,13 +174,33 @@ public class ReviewAgent {
     }
 
     private Resource downloadFileAsResource(ReviewTaskFile taskFile) {
-        if (taskFile.getOssId() != null) {
+        // 优先通过 OSS 下载
+        if (taskFile.getOssId() != null && taskFile.getOssId() > 0) {
             SysOssVo ossVo = TenantHelper.ignore(() -> ossService.getById(taskFile.getOssId()));
             if (ossVo != null) {
                 OssClient storage = OssFactory.instance(ossVo.getService());
                 Path tempFile = storage.fileDownload(ossVo.getFileName());
                 log.info("[ReviewAgent] 文件已下载到临时路径: {}", tempFile);
                 return new FileSystemResource(tempFile.toFile());
+            }
+        }
+        // 通过 filePath URL 直接下载（外部系统传入的文件）
+        if (taskFile.getFilePath() != null && !taskFile.getFilePath().isBlank()) {
+            try {
+                String fileUrl = taskFile.getFilePath();
+                if (!fileUrl.startsWith("http")) {
+                    fileUrl = "http://192.168.169.47:9004/" + fileUrl;
+                }
+                log.info("[ReviewAgent] 通过URL下载文件: {}", fileUrl);
+                java.net.URL url = java.net.URI.create(fileUrl).toURL();
+                java.io.InputStream in = url.openStream();
+                String suffix = fileUrl.contains(".") ? fileUrl.substring(fileUrl.lastIndexOf('.')) : ".tmp";
+                java.io.File tempFile = java.io.File.createTempFile("review_", suffix);
+                java.nio.file.Files.copy(in, tempFile.toPath(), java.nio.file.StandardCopyOption.REPLACE_EXISTING);
+                in.close();
+                return new FileSystemResource(tempFile);
+            } catch (Exception e) {
+                log.error("[ReviewAgent] URL下载文件失败: {}", e.getMessage());
             }
         }
         throw new RuntimeException("无法下载文件: ossId=" + taskFile.getOssId() + ", fileName=" + taskFile.getFileName());
@@ -730,6 +755,62 @@ public class ReviewAgent {
             case "warning" -> "警告";
             case "info" -> "提示";
             default -> severity;
+        };
+    }
+
+    // ==================== 外部系统回调 ====================
+
+    /**
+     * 审核完成后回调外部系统（如商会系统）
+     * 根据 sourceType 路由到对应的回调地址
+     */
+    private void callbackExternalSystem(ReviewTask task) {
+        if (task.getSourceType() == null || task.getSourceId() == null) {
+            return;
+        }
+        String callbackUrl = resolveCallbackUrl(task.getSourceType());
+        if (callbackUrl == null) {
+            return;
+        }
+        try {
+            JSONObject payload = new JSONObject();
+            payload.put("taskId", task.getId());
+            payload.put("sourceId", task.getSourceId());
+            payload.put("sourceType", task.getSourceType());
+            payload.put("status", task.getStatus());
+            payload.put("passStatus", task.getPassStatus());
+            payload.put("score", task.getScore());
+            payload.put("aiSummary", task.getAiSummary());
+            payload.put("errorCount", task.getErrorCount());
+            payload.put("warningCount", task.getWarningCount());
+            payload.put("version", task.getVersion());
+
+            java.net.http.HttpClient client = java.net.http.HttpClient.newBuilder()
+                .connectTimeout(java.time.Duration.ofSeconds(5))
+                .build();
+            java.net.http.HttpRequest request = java.net.http.HttpRequest.newBuilder()
+                .uri(java.net.URI.create(callbackUrl))
+                .timeout(java.time.Duration.ofSeconds(10))
+                .header("Content-Type", "application/json")
+                .POST(java.net.http.HttpRequest.BodyPublishers.ofString(payload.toJSONString()))
+                .build();
+            java.net.http.HttpResponse<String> resp = client.send(request,
+                java.net.http.HttpResponse.BodyHandlers.ofString());
+            log.info("[ReviewAgent] 回调外部系统成功: url={}, taskId={}, status={}",
+                callbackUrl, task.getId(), resp.statusCode());
+        } catch (Exception e) {
+            log.warn("[ReviewAgent] 回调外部系统失败: sourceType={}, taskId={}, err={}",
+                task.getSourceType(), task.getId(), e.getMessage());
+        }
+    }
+
+    /**
+     * 根据 sourceType 解析回调地址
+     */
+    private String resolveCallbackUrl(String sourceType) {
+        return switch (sourceType) {
+            case "company" -> "http://127.0.0.1:8000/api/v1/admin/company/review-callback";
+            default -> null;
         };
     }
 }

@@ -72,6 +72,11 @@ public class ReviewTaskBo extends BaseEntity {
     private String formSnapshot;
 
     /**
+     * 父任务ID（重新审核时指向上一次任务）
+     */
+    private Long parentTaskId;
+
+    /**
      * 附件列表（非Entity字段，Service层处理）
      */
     private List<TaskFileBo> files;
