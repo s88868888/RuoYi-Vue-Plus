@@ -140,6 +140,18 @@ tenant:
     - review_standard_knowledge
     - review_task_standard
     - review_doc_paragraph
+    # —— 以下为支持"无登录"外部系统调用，跳过租户过滤 ——
+    - review_prompt_template
+    - review_standard
+    - review_standard_rule
+    - review_knowledge
+    - review_knowledge_doc
+    - review_knowledge_case
+    - review_knowledge_pattern
+    - review_knowledge_misjudgment
+    - review_task
+    - review_task_file
+    - review_result_item
 
 # MyBatisPlus配置
 # https://baomidou.com/config/
