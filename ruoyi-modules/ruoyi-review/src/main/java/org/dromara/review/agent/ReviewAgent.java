@@ -8,6 +8,7 @@ import com.baomidou.mybatisplus.core.toolkit.Wrappers;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.dromara.common.ai.service.AiChatService;
+import org.dromara.common.ai.util.PdfTextExtractor;
 import org.dromara.common.oss.core.OssClient;
 import org.dromara.common.oss.factory.OssFactory;
 import org.dromara.common.tenant.helper.TenantHelper;
@@ -16,11 +17,13 @@ import org.dromara.review.mapper.*;
 import org.dromara.review.service.ReviewRagService;
 import org.dromara.system.domain.vo.SysOssVo;
 import org.dromara.system.service.ISysOssService;
+import org.springframework.core.io.ByteArrayResource;
 import org.springframework.core.io.FileSystemResource;
 import org.springframework.core.io.Resource;
 import org.springframework.stereotype.Component;
 import org.springframework.transaction.annotation.Transactional;
 
+import java.io.File;
 import java.nio.file.Path;
 import java.util.HashSet;
 import java.util.List;
@@ -140,14 +143,21 @@ public class ReviewAgent {
     }
 
     /**
-     * 根据附件类型自动选择 AI 调用方式
+     * 根据附件类型自动选择 AI 调用方式：
+     * - 有图片附件 → qwen-vl 视觉模型（当前取第一张）
+     * - 有文档附件 → 每份PDF探测文本层，打印件直接抽文本，扫描件逐页OCR；最终用 qwen-long 做纯文本比对
+     * - 无附件 → qwen-plus 文本模型
      */
     private String callAi(List<ReviewTaskFile> files, String systemPrompt, String userPrompt, ReviewPromptTemplate template) {
-        ReviewTaskFile imageFile = files.stream().filter(f -> isImageFile(f.getFileType())).findFirst().orElse(null);
-        ReviewTaskFile docFile = files.stream().filter(f -> isDocumentFile(f.getFileType())).findFirst().orElse(null);
+        List<ReviewTaskFile> imageFiles = files.stream()
+            .filter(f -> isImageFile(f.getFileType())).collect(Collectors.toList());
+        List<ReviewTaskFile> docFiles = files.stream()
+            .filter(f -> isDocumentFile(f.getFileType())).collect(Collectors.toList());
 
-        if (imageFile != null) {
-            log.info("[ReviewAgent] 检测到图片附件，使用视觉模型 (qwen3-vl-plus), ossId={}", imageFile.getOssId());
+        if (!imageFiles.isEmpty()) {
+            ReviewTaskFile imageFile = imageFiles.get(0);
+            log.info("[ReviewAgent] 检测到 {} 张图片附件，使用视觉模型 (qwen3-vl-plus), 首张 ossId={}",
+                imageFiles.size(), imageFile.getOssId());
             try {
                 Resource resource = downloadFileAsResource(imageFile);
                 return aiChatService.chatWithImage(systemPrompt, resource, userPrompt);
@@ -157,14 +167,23 @@ public class ReviewAgent {
             }
         }
 
-        if (docFile != null) {
-            log.info("[ReviewAgent] 检测到文档附件，使用文档分析模型 (qwen-long), ossId={}", docFile.getOssId());
+        if (!docFiles.isEmpty()) {
+            log.info("[ReviewAgent] 检测到 {} 份文档附件，开始文本层探测 + OCR 预处理", docFiles.size());
             try {
-                Resource resource = downloadFileAsResource(docFile);
-                String fullPrompt = systemPrompt + "\n\n" + userPrompt;
-                return aiChatService.chatWithDocument(resource, fullPrompt);
+                StringBuilder docsBlock = new StringBuilder();
+                for (int i = 0; i < docFiles.size(); i++) {
+                    ReviewTaskFile f = docFiles.get(i);
+                    String docText = extractOrOcrPdf(f);
+                    docsBlock.append("【文件").append(i + 1).append("：")
+                        .append(f.getFileName() == null ? "未命名" : f.getFileName()).append("】\n")
+                        .append(docText).append("\n\n");
+                }
+                // 把"两份/多份文档的纯文本"作为正文，与原本的 userPrompt（业务指令、规则等）拼起来
+                String enrichedUser = docsBlock + "\n=== 审核任务指令 ===\n" + userPrompt;
+                log.info("[ReviewAgent] 文档预处理完成，文本总长度={}", enrichedUser.length());
+                return aiChatService.chatLong(systemPrompt, enrichedUser);
             } catch (Exception e) {
-                log.error("[ReviewAgent] 文档文件下载或分析失败: {}", e.getMessage(), e);
+                log.error("[ReviewAgent] 文档预处理或审核失败: {}", e.getMessage(), e);
                 throw new RuntimeException("文档审核失败: " + e.getMessage(), e);
             }
         }
@@ -173,7 +192,51 @@ public class ReviewAgent {
         return aiChatService.chat(systemPrompt, userPrompt);
     }
 
+    /**
+     * 把一份 PDF 转成纯文本：
+     * - 打印件（有文本层）→ PDFBox 直接抽取
+     * - 扫描件（无文本层）→ 逐页渲染为 PNG → qwen-vl OCR → 拼接
+     * <p>
+     * 非 PDF 文档（docx/xlsx 等）目前直接 OCR fallback 走不到，会在调用方报"不支持的文档类型"。
+     */
+    private String extractOrOcrPdf(ReviewTaskFile taskFile) throws Exception {
+        Resource resource = downloadFileAsResource(taskFile);
+        if (!(resource instanceof FileSystemResource)) {
+            throw new RuntimeException("文档预处理仅支持本地文件资源，实际类型: " + resource.getClass().getName());
+        }
+        File pdfFile = ((FileSystemResource) resource).getFile();
+        String ext = taskFile.getFileType() == null ? "" : taskFile.getFileType().toLowerCase();
+        if (!"pdf".equals(ext)) {
+            throw new RuntimeException("当前文档审核仅支持 PDF 格式（含打印件和扫描件），收到: " + ext);
+        }
+
+        if (PdfTextExtractor.hasTextLayer(pdfFile)) {
+            String text = PdfTextExtractor.extractText(pdfFile);
+            log.info("[ReviewAgent] {} 为打印件，PDFBox 抽出 {} 字符", taskFile.getFileName(), text.length());
+            return text;
+        }
+
+        log.info("[ReviewAgent] {} 为扫描件，逐页OCR开始", taskFile.getFileName());
+        List<byte[]> pages = PdfTextExtractor.renderPagesToPng(pdfFile);
+        StringBuilder sb = new StringBuilder();
+        for (int p = 0; p < pages.size(); p++) {
+            final int pageNo = p + 1;
+            byte[] pngBytes = pages.get(p);
+            ByteArrayResource pageRes = new ByteArrayResource(pngBytes) {
+                @Override
+                public String getFilename() { return "page-" + pageNo + ".png"; }
+            };
+            String pageText = aiChatService.ocrImage(pageRes);
+            sb.append("--- 第").append(pageNo).append("页 ---\n").append(pageText).append("\n");
+            log.info("[ReviewAgent] {} 第{}页OCR完成，识别 {} 字符",
+                taskFile.getFileName(), pageNo, pageText == null ? 0 : pageText.length());
+        }
+        return sb.toString();
+    }
+
     private Resource downloadFileAsResource(ReviewTaskFile taskFile) {
+        log.info("[ReviewAgent] downloadFileAsResource 入参 ossId={}, fileName={}, fileType={}, filePath={}",
+            taskFile.getOssId(), taskFile.getFileName(), taskFile.getFileType(), taskFile.getFilePath());
         // 优先通过 OSS 下载
         if (taskFile.getOssId() != null && taskFile.getOssId() > 0) {
             SysOssVo ossVo = TenantHelper.ignore(() -> ossService.getById(taskFile.getOssId()));
@@ -186,24 +249,66 @@ public class ReviewAgent {
         }
         // 通过 filePath URL 直接下载（外部系统传入的文件）
         if (taskFile.getFilePath() != null && !taskFile.getFilePath().isBlank()) {
+            String fileUrl = taskFile.getFilePath();
             try {
-                String fileUrl = taskFile.getFilePath();
                 if (!fileUrl.startsWith("http")) {
                     fileUrl = "http://192.168.169.47:9004/" + fileUrl;
                 }
-                log.info("[ReviewAgent] 通过URL下载文件: {}", fileUrl);
-                java.net.URL url = java.net.URI.create(fileUrl).toURL();
-                java.io.InputStream in = url.openStream();
-                String suffix = fileUrl.contains(".") ? fileUrl.substring(fileUrl.lastIndexOf('.')) : ".tmp";
-                java.io.File tempFile = java.io.File.createTempFile("review_", suffix);
-                java.nio.file.Files.copy(in, tempFile.toPath(), java.nio.file.StandardCopyOption.REPLACE_EXISTING);
-                in.close();
-                return new FileSystemResource(tempFile);
+                // 中文路径要做 percent-encoding，否则 URL.openStream 会 400
+                String encodedUrl = encodeUrlPathSegments(fileUrl);
+                log.info("[ReviewAgent] 通过URL下载文件: 原始={}, 编码后={}", fileUrl, encodedUrl);
+                java.net.URL url = java.net.URI.create(encodedUrl).toURL();
+                java.net.URLConnection conn = url.openConnection();
+                conn.setConnectTimeout(15000);
+                conn.setReadTimeout(60000);
+                try (java.io.InputStream in = conn.getInputStream()) {
+                    String suffix = ".tmp";
+                    int dot = fileUrl.lastIndexOf('.');
+                    int q = fileUrl.indexOf('?');
+                    if (dot > 0) {
+                        suffix = q > dot ? fileUrl.substring(dot, q) : fileUrl.substring(dot);
+                    }
+                    java.io.File tempFile = java.io.File.createTempFile("review_", suffix);
+                    java.nio.file.Files.copy(in, tempFile.toPath(), java.nio.file.StandardCopyOption.REPLACE_EXISTING);
+                    log.info("[ReviewAgent] URL下载完成 → {} ({} bytes)", tempFile, tempFile.length());
+                    return new FileSystemResource(tempFile);
+                }
             } catch (Exception e) {
-                log.error("[ReviewAgent] URL下载文件失败: {}", e.getMessage());
+                // 不再吞异常，把根因抛出来
+                throw new RuntimeException("通过URL下载文件失败: url=" + fileUrl + ", 原因=" + e.getMessage(), e);
             }
         }
-        throw new RuntimeException("无法下载文件: ossId=" + taskFile.getOssId() + ", fileName=" + taskFile.getFileName());
+        throw new RuntimeException("无法下载文件: ossId=" + taskFile.getOssId()
+            + ", fileName=" + taskFile.getFileName() + ", filePath=" + taskFile.getFilePath());
+    }
+
+    /**
+     * 对 URL 路径段做 percent-encoding（保留 / : ? &），避免中文路径触发 400
+     */
+    private static String encodeUrlPathSegments(String rawUrl) {
+        try {
+            int schemeEnd = rawUrl.indexOf("://");
+            if (schemeEnd < 0) return rawUrl;
+            int pathStart = rawUrl.indexOf('/', schemeEnd + 3);
+            if (pathStart < 0) return rawUrl;
+            String prefix = rawUrl.substring(0, pathStart);
+            String pathAndQuery = rawUrl.substring(pathStart);
+            int qIdx = pathAndQuery.indexOf('?');
+            String path = qIdx >= 0 ? pathAndQuery.substring(0, qIdx) : pathAndQuery;
+            String query = qIdx >= 0 ? pathAndQuery.substring(qIdx) : "";
+            StringBuilder sb = new StringBuilder();
+            for (String seg : path.split("/", -1)) {
+                if (sb.length() > 0 || path.startsWith("/")) sb.append('/');
+                sb.append(java.net.URLEncoder.encode(seg, java.nio.charset.StandardCharsets.UTF_8).replace("+", "%20"));
+            }
+            // 上面循环会把首个 '/' 也加一次，简化处理：直接按 '/' 拆分
+            String encodedPath = java.util.Arrays.stream(path.split("/", -1))
+                .map(s -> java.net.URLEncoder.encode(s, java.nio.charset.StandardCharsets.UTF_8).replace("+", "%20"))
+                .reduce((a, b) -> a + "/" + b).orElse("");
+            return prefix + encodedPath + query;
+        } catch (Exception e) {
+            return rawUrl;
+        }
     }
 
     private String determineModel(List<ReviewTaskFile> files, ReviewPromptTemplate template) {
@@ -516,6 +621,19 @@ public class ReviewAgent {
     private void saveToKnowledgeCase(ReviewTask task, List<Long> standardIds) {
         try {
             if (standardIds.isEmpty()) return;
+
+            // 守卫：避免把"失败/无效"的审核结果写入知识库，否则 RAG 会反复检索到这些反例形成自证预言
+            String summary = task.getAiSummary() == null ? "" : task.getAiSummary();
+            boolean isInvalidResult = "failed".equalsIgnoreCase(task.getStatus())
+                || summary.contains("未提交")
+                || summary.contains("无法进行")
+                || summary.contains("审核执行异常")
+                || summary.contains("无法识别");
+            if (isInvalidResult) {
+                log.info("[ReviewAgent] 跳过将无效/失败案例写入知识库（taskId={}, status={}, summary={}）",
+                    task.getId(), task.getStatus(), summary);
+                return;
+            }
 
             // 构建 标准ID → 知识库ID 的映射
             List<ReviewStandardKnowledge> skList = standardKnowledgeMapper.selectList(

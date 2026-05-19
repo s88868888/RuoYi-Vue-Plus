@@ -49,7 +49,6 @@ public class ReviewStandardController extends BaseController {
     /**
      * 分页查询标准列表
      */
-    @SaCheckPermission("review:standard:list")
     @GetMapping("/list")
     public TableDataInfo<ReviewStandardVo> list(ReviewStandardBo bo, PageQuery pageQuery) {
         return reviewStandardService.queryPageList(bo, pageQuery);
@@ -60,7 +59,6 @@ public class ReviewStandardController extends BaseController {
      *
      * @param id 主键
      */
-    @SaCheckPermission("review:standard:query")
     @GetMapping("/{id}")
     public R<ReviewStandardVo> getInfo(@NotNull(message = "主键不能为空") @PathVariable Long id) {
         return R.ok(reviewStandardService.queryById(id));

@@ -39,9 +39,9 @@ public class ReviewTask extends TenantEntity {
     private String taskType;
 
     /**
-     * 来源ID
+     * 来源ID（兼容外部业务系统的UUID/字符串ID，如旧城更协议ID）
      */
-    private Long sourceId;
+    private String sourceId;
 
     /**
      * 来源类型

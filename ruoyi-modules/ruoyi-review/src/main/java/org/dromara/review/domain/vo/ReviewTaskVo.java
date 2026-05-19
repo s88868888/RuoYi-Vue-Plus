@@ -47,10 +47,10 @@ public class ReviewTaskVo implements Serializable {
     private String taskType;
 
     /**
-     * 来源ID
+     * 来源ID（兼容外部业务系统的UUID/字符串ID）
      */
     @ExcelProperty(value = "来源ID")
-    private Long sourceId;
+    private String sourceId;
 
     /**
      * 来源类型

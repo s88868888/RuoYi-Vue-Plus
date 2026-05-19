@@ -39,7 +39,6 @@ public class ReviewTaskController extends BaseController {
     /**
      * 分页查询任务列表
      */
-    @SaCheckPermission("review:task:list")
     @GetMapping("/list")
     public TableDataInfo<ReviewTaskVo> list(ReviewTaskBo bo, PageQuery pageQuery) {
         return reviewTaskService.queryPageList(bo, pageQuery);
@@ -50,7 +49,6 @@ public class ReviewTaskController extends BaseController {
      *
      * @param id 主键
      */
-    @SaCheckPermission("review:task:query")
     @GetMapping("/{id}")
     public R<ReviewTaskVo> getInfo(@NotNull(message = "主键不能为空") @PathVariable Long id) {
         return R.ok(reviewTaskService.queryById(id));
@@ -59,7 +57,6 @@ public class ReviewTaskController extends BaseController {
     /**
      * 创建审核任务
      */
-    @SaCheckPermission("review:task:add")
     @Log(title = "审核任务", businessType = BusinessType.INSERT)
     @RepeatSubmit()
     @PostMapping()
@@ -72,7 +69,6 @@ public class ReviewTaskController extends BaseController {
      *
      * @param id 任务ID
      */
-    @SaCheckPermission("review:task:edit")
     @Log(title = "执行AI审核", businessType = BusinessType.UPDATE)
     @PostMapping("/{id}/execute")
     public R<Void> execute(@NotNull(message = "任务ID不能为空") @PathVariable Long id) {
@@ -87,7 +83,6 @@ public class ReviewTaskController extends BaseController {
      * @param resultItemId 审核结果项ID
      * @param body         请求体（含reason字段）
      */
-    @SaCheckPermission("review:task:edit")
     @Log(title = "标记误判", businessType = BusinessType.UPDATE)
     @PutMapping("/{id}/misjudgment/{resultItemId}")
     public R<Void> markMisjudgment(@NotNull(message = "任务ID不能为空") @PathVariable Long id,
@@ -102,7 +97,6 @@ public class ReviewTaskController extends BaseController {
      *
      * @param ids 主键串
      */
-    @SaCheckPermission("review:task:remove")
     @Log(title = "审核任务", businessType = BusinessType.DELETE)
     @DeleteMapping("/{ids}")
     public R<Void> remove(@NotEmpty(message = "主键不能为空") @PathVariable Long[] ids) {
@@ -114,7 +108,6 @@ public class ReviewTaskController extends BaseController {
      *
      * @param id 任务ID
      */
-    @SaCheckPermission("review:task:query")
     @GetMapping("/{id}/results")
     public R<List<ReviewResultItemVo>> listResults(@NotNull(message = "任务ID不能为空") @PathVariable Long id) {
         return R.ok(reviewTaskService.queryResultItems(id));

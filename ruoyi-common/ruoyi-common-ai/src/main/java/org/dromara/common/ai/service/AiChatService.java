@@ -40,6 +40,7 @@ public class AiChatService {
     private final ChatClient chatClient;
     private final ChatClient multiModalChatClient;
     private final DashScopeDocumentAnalysisAdvisor documentAdvisor;
+    private final String dashScopeApiKey;
 
     /**
      * 最大重试次数
@@ -72,6 +73,7 @@ public class AiChatService {
                          @Value("${spring.ai.dashscope.multimodal-completions-path:/api/v1/services/aigc/multimodal-generation/generation}") String multiModalCompletionsPath,
                          @Value("${spring.ai.dashscope.http-client.read-timeout:300000}") int aiReadTimeout) {
         this.embeddingModel = embeddingModel;
+        this.dashScopeApiKey = apiKey;
         this.documentAdvisor = new DashScopeDocumentAnalysisAdvisor(new SimpleApiKey(apiKey));
         // 不注册为 defaultAdvisors，避免普通 chat 请求触发文档解析导致 URL 错误
         this.chatClient = chatClientBuilder.build();
@@ -127,7 +129,7 @@ public class AiChatService {
         .withMultiModel(true)
         .withTemperature(0.1)
         .withTopP(0.8)
-        .withMaxToken(4096)
+        .withMaxToken(32768)
         .build();
 
     private static final DashScopeChatOptions DOC_OPTIONS = DashScopeChatOptions.builder()
@@ -352,6 +354,45 @@ public class AiChatService {
     }
 
     /**
+     * 对单张图片做 OCR：让视觉模型 (qwen3-vl-plus) 提取图片上的所有文字。
+     * <p>
+     * 典型场景：扫描件 PDF 每一页转 PNG 后逐页 OCR，把图片"还原"成可比对的文本。
+     *
+     * @param imageResource 图片资源（PNG/JPG等）
+     * @return 提取到的纯文本（按版面顺序）
+     */
+    public String ocrImage(Resource imageResource) {
+        String systemPrompt = "你是一个高精度OCR助手。你只输出图片中的文字内容，不做任何总结、解释或评价。";
+        String userPrompt = "请提取图片中的所有文字，要求：\n"
+            + "1. 按从上到下、从左到右的版面顺序输出；\n"
+            + "2. 保留原始换行、字段标签、表格分隔（用|分隔列即可，不必画完整表格）；\n"
+            + "3. 对于印章、手写签字、日期，照样识别并标注（如：[印章: 某某村委会]、[签字: 张三]、[日期: 2026-05-19]）；\n"
+            + "4. 模糊字识别不出时用 [?] 占位，不要凭空补字；\n"
+            + "5. 直接输出文字，不要任何前缀如 \"识别结果：\"。";
+        return chatWithImage(systemPrompt, imageResource, userPrompt);
+    }
+
+    /**
+     * 长文本对话（qwen-long-latest），用于 OCR 后多文档拼接成纯文本的比对场景。
+     * <p>
+     * 与 {@link #chat(String, String)} (qwen-plus, 截断 12K) 的区别：
+     * - 走 qwen-long 长上下文模型，可吃下数万字符的拼接文本
+     * - 不做长度截断，调用方自行控制
+     * - 不做 URL/tmp 过滤（OCR 出来的协议正文不含敏感链接）
+     */
+    public String chatLong(String systemPrompt, String userMessage) {
+        final String sys = systemPrompt == null ? "" : systemPrompt;
+        final String usr = userMessage == null ? "" : userMessage;
+        log.info("[chatLong] systemLen={}, userLen={}", sys.length(), usr.length());
+        return callWithRetry(() -> chatClient.prompt()
+            .system(sys)
+            .user(usr)
+            .options(DOC_OPTIONS)
+            .call()
+            .content());
+    }
+
+    /**
      * 通过 Resource 对象传递文件进行分析
      *
      * @param resource    文件资源
@@ -393,6 +434,95 @@ public class AiChatService {
      */
     public String chatWithDocumentUrl(String url, String userMessage) {
         return chatWithDocument(UrlResource.from(url), userMessage);
+    }
+
+    /**
+     * 多文档分析（qwen-long 原生支持）
+     * <p>
+     * 把多个文件分别上传到 DashScope file API，拿到一组 fileid://xxx ，逗号拼到 system message 顶部，
+     * 让模型在同一次调用里同时看到所有文档（典型场景：A vs B 双文件比对、合同对照、附件互查）。
+     * <p>
+     * 实现参考自 DashScopeDocumentAnalysisAdvisor#upload，在此扩展为多文件版本。
+     *
+     * @param systemPrompt 业务系统提示词（可包含 {output_format} 等占位符；这里不再做占位符替换）
+     * @param resources    多个文件资源
+     * @param userMessage  用户消息
+     * @return AI 回复
+     */
+    public String chatWithDocuments(String systemPrompt, java.util.List<Resource> resources, String userMessage) {
+        if (resources == null || resources.isEmpty()) {
+            throw new IllegalArgumentException("resources 不能为空");
+        }
+        return callWithRetry(() -> {
+            // 1) 逐个上传文件，拿 fileid 列表
+            java.util.List<String> fileIds = new java.util.ArrayList<>();
+            for (Resource r : resources) {
+                String fileId = uploadFileForChatWithDocuments(r);
+                fileIds.add(fileId);
+                log.info("[AiChat] 文档上传完成 → fileid={} (filename={})", fileId, r.getFilename());
+            }
+
+            // 2) qwen-long 协议要求：
+            //    - system message 内容必须是纯 "fileid://A,fileid://B"，逗号分隔，不能有任何额外字符（含换行）
+            //    - 多条 SystemMessage 会被 DashScopeChatModel 合并成一条（用 \n\n 拼），所以也不能多条 system
+            //    - 业务提示词必须放到 user message 里
+            StringBuilder sysContent = new StringBuilder();
+            for (int i = 0; i < fileIds.size(); i++) {
+                if (i > 0) sysContent.append(',');
+                sysContent.append("fileid://").append(fileIds.get(i));
+            }
+
+            // 3) 把 systemPrompt + userMessage 合并成 user 内容
+            StringBuilder userContent = new StringBuilder();
+            if (systemPrompt != null && !systemPrompt.isBlank()) {
+                userContent.append(systemPrompt).append("\n\n");
+            }
+            if (userMessage != null && !userMessage.isBlank()) {
+                userContent.append(userMessage);
+            }
+
+            log.info("[AiChat] 多文档审核：system={}, userContentLen={}",
+                sysContent, userContent.length());
+
+            return chatClient.prompt()
+                .system(sysContent.toString())
+                .user(userContent.toString())
+                .options(DOC_OPTIONS)
+                .call()
+                .content();
+        });
+    }
+
+    /**
+     * 上传一个 Resource 到 DashScope file API（purpose=file-extract），返回 fileid
+     * 复用本类已有的 dashScopeApiKey + multiModalChatClient 暴露的 webClient 实例不太方便，
+     * 这里直接用 RestTemplate 风格的 multipart 上传（依赖 spring-web）。
+     */
+    private String uploadFileForChatWithDocuments(Resource resource) {
+        try {
+            org.springframework.http.HttpHeaders headers = new org.springframework.http.HttpHeaders();
+            headers.setBearerAuth(dashScopeApiKey);
+            headers.setContentType(org.springframework.http.MediaType.MULTIPART_FORM_DATA);
+
+            org.springframework.util.LinkedMultiValueMap<String, Object> form = new org.springframework.util.LinkedMultiValueMap<>();
+            form.add("file", resource);
+            form.add("purpose", "file-extract");
+
+            org.springframework.http.HttpEntity<org.springframework.util.MultiValueMap<String, Object>> entity =
+                new org.springframework.http.HttpEntity<>(form, headers);
+
+            // 使用与 DashScopeDocumentAnalysisAdvisor 相同的端点
+            String uploadUrl = "https://dashscope.aliyuncs.com/compatible-mode/v1/files";
+            org.springframework.web.client.RestTemplate rt = new org.springframework.web.client.RestTemplate();
+            org.springframework.http.ResponseEntity<java.util.Map> resp =
+                rt.postForEntity(uploadUrl, entity, java.util.Map.class);
+            if (resp.getBody() == null || resp.getBody().get("id") == null) {
+                throw new RuntimeException("文件上传失败：响应无 id 字段，body=" + resp.getBody());
+            }
+            return resp.getBody().get("id").toString();
+        } catch (Exception e) {
+            throw new RuntimeException("上传文件到 DashScope 失败: " + e.getMessage(), e);
+        }
     }
 
     /**

@@ -39,7 +39,6 @@ public class ReviewPromptTemplateController extends BaseController {
      *
      * @param type 模板类型
      */
-    @SaCheckPermission("review:prompt:list")
     @GetMapping("/list")
     public R<List<ReviewPromptTemplateVo>> list(@RequestParam(required = false) String type) {
         return R.ok(reviewPromptTemplateService.queryListByType(type));
@@ -50,7 +49,6 @@ public class ReviewPromptTemplateController extends BaseController {
      *
      * @param id 主键
      */
-    @SaCheckPermission("review:prompt:query")
     @GetMapping("/{id}")
     public R<ReviewPromptTemplateVo> getInfo(@NotNull(message = "主键不能为空") @PathVariable Long id) {
         return R.ok(reviewPromptTemplateService.queryById(id));
