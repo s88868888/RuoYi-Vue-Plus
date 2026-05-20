@@ -157,42 +157,105 @@ public class ReviewTaskServiceImpl implements IReviewTaskService {
 
     /**
      * 创建审核任务（含关联标准、保存附件、自动触发AI审核）
+     *
+     * 同来源(sourceId+sourceType)已存在记录时不再 INSERT，而是 UPDATE 原行：
+     *   version+1、清理旧附件/标准/结果明细、状态重置后重跑审核。
+     * 这样列表里「审核次数」始终对应同一文档的累计次数，不会因为多次重审产生多行。
      */
     @Override
     @Transactional(rollbackFor = Exception.class)
     public Long createTask(ReviewTaskBo bo) {
-        // 1. 插入审核任务
+        // 1. 命中同来源旧任务 → 走"复用同一行"分支
+        ReviewTask existing = null;
+        if (StringUtils.isNotBlank(bo.getSourceId()) && StringUtils.isNotBlank(bo.getSourceType())) {
+            existing = baseMapper.selectOne(
+                Wrappers.<ReviewTask>lambdaQuery()
+                    .eq(ReviewTask::getSourceId, bo.getSourceId())
+                    .eq(ReviewTask::getSourceType, bo.getSourceType())
+                    .orderByDesc(ReviewTask::getCreateTime)
+                    .last("LIMIT 1")
+            );
+        }
+
+        if (existing != null) {
+            Long taskId = existing.getId();
+            // 清掉这条任务的旧子表数据（标准关联 / 附件 / 结果明细）
+            reviewTaskStandardMapper.delete(
+                Wrappers.<ReviewTaskStandard>lambdaQuery().eq(ReviewTaskStandard::getTaskId, taskId)
+            );
+            reviewTaskFileMapper.delete(
+                Wrappers.<ReviewTaskFile>lambdaQuery().eq(ReviewTaskFile::getTaskId, taskId)
+            );
+            reviewResultItemMapper.delete(
+                Wrappers.<ReviewResultItem>lambdaQuery().eq(ReviewResultItem::getTaskId, taskId)
+            );
+
+            // 把新提交的字段拷到老行上
+            BeanUtil.copyProperties(bo, existing, "id", "version", "parentTaskId", "createTime", "createBy");
+            existing.setFormSnapshot(bo.getFormSnapshot());
+            existing.setVersion((existing.getVersion() == null ? 1 : existing.getVersion()) + 1);
+            // 重审重置状态与统计
+            existing.setStatus("pending");
+            existing.setPassStatus(null);
+            existing.setScore(null);
+            existing.setReviewDuration(null);
+            existing.setAiSummary(null);
+            existing.setResultJson(null);
+            existing.setResultMarkdown(null);
+            existing.setTotalRules(null);
+            existing.setPassCount(null);
+            existing.setErrorCount(null);
+            existing.setWarningCount(null);
+            existing.setInfoCount(null);
+            existing.setMisjudgedCount(0);
+            baseMapper.updateById(existing);
+
+            // 重新写关联标准 & 附件
+            insertStandards(taskId, bo.getStandardIds());
+            insertFiles(taskId, bo.getFiles());
+
+            // 触发审核（外部系统集成场景）
+            triggerExecuteIfExternal(bo, taskId);
+            return taskId;
+        }
+
+        // 2. 全新任务 → 正常 INSERT
         ReviewTask task = BeanUtil.toBean(bo, ReviewTask.class);
         task.setFormSnapshot(bo.getFormSnapshot());
 
-        // 处理重新审核：设置parentTaskId并递增version
+        // 显式传 parentTaskId 时（手工"重新审核"按钮等场景）按链路递增 version
         if (bo.getParentTaskId() != null) {
             task.setParentTaskId(bo.getParentTaskId());
             ReviewTask parentTask = baseMapper.selectById(bo.getParentTaskId());
-            if (parentTask != null) {
+            if (parentTask != null && parentTask.getVersion() != null) {
                 task.setVersion(parentTask.getVersion() + 1);
             }
         }
 
         baseMapper.insert(task);
+        insertStandards(task.getId(), bo.getStandardIds());
+        insertFiles(task.getId(), bo.getFiles());
+        triggerExecuteIfExternal(bo, task.getId());
+        return task.getId();
+    }
 
-        // 2. 遍历标准ID列表插入关联关系
-        List<Long> standardIds = bo.getStandardIds();
+    private void insertStandards(Long taskId, List<Long> standardIds) {
         if (CollUtil.isNotEmpty(standardIds)) {
             for (Long standardId : standardIds) {
                 ReviewTaskStandard taskStandard = new ReviewTaskStandard();
-                taskStandard.setTaskId(task.getId());
+                taskStandard.setTaskId(taskId);
                 taskStandard.setStandardId(standardId);
                 reviewTaskStandardMapper.insert(taskStandard);
             }
         }
+    }
 
-        // 3. 保存附件
-        if (CollUtil.isNotEmpty(bo.getFiles())) {
+    private void insertFiles(Long taskId, List<ReviewTaskBo.TaskFileBo> files) {
+        if (CollUtil.isNotEmpty(files)) {
             int sortOrder = 1;
-            for (ReviewTaskBo.TaskFileBo fileBo : bo.getFiles()) {
+            for (ReviewTaskBo.TaskFileBo fileBo : files) {
                 ReviewTaskFile taskFile = new ReviewTaskFile();
-                taskFile.setTaskId(task.getId());
+                taskFile.setTaskId(taskId);
                 taskFile.setOssId(fileBo.getOssId());
                 taskFile.setFileName(fileBo.getFileName());
                 taskFile.setFileType(fileBo.getFileType());
@@ -202,26 +265,23 @@ public class ReviewTaskServiceImpl implements IReviewTaskService {
                 reviewTaskFileMapper.insert(taskFile);
             }
         }
+    }
 
-        // 4. 外部系统创建（如商会系统）自动触发审核
-        //    用 afterCommit 钩子确保当前事务提交后才异步执行审核，避免事务可见性/死锁问题
+    private void triggerExecuteIfExternal(ReviewTaskBo bo, Long taskId) {
         if (StringUtils.isNotBlank(bo.getSourceType()) && !"manual".equals(bo.getSourceType())) {
-            final Long newTaskId = task.getId();
             if (org.springframework.transaction.support.TransactionSynchronizationManager.isSynchronizationActive()) {
                 org.springframework.transaction.support.TransactionSynchronizationManager.registerSynchronization(
                     new org.springframework.transaction.support.TransactionSynchronization() {
                         @Override
                         public void afterCommit() {
-                            executeReview(newTaskId);
+                            executeReview(taskId);
                         }
                     }
                 );
             } else {
-                executeReview(newTaskId);
+                executeReview(taskId);
             }
         }
-
-        return task.getId();
     }
 
     /**

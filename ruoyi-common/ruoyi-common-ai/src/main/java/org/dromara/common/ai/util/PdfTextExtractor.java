@@ -20,6 +20,7 @@ import java.util.List;
  * - {@link #hasTextLayer(File)} 探测有没有文本层
  * - {@link #extractText(File)}  对打印件直接抽文本
  * - {@link #renderPagesToPng(File)} 对扫描件逐页转 PNG，交给视觉模型 OCR
+ * @author Linson
  */
 @Slf4j
 public class PdfTextExtractor {

@@ -39,6 +39,7 @@ import java.util.stream.Collectors;
  * - 图片附件（营业执照等）→ qwen-vl 视觉模型
  * - 文档附件（合同、报表等）→ qwen-long 文档分析模型
  * - 纯表单（无附件）→ qwen-plus 文本模型
+ * @author Linson
  */
 @Slf4j
 @Component
@@ -150,9 +151,9 @@ public class ReviewAgent {
      */
     private String callAi(List<ReviewTaskFile> files, String systemPrompt, String userPrompt, ReviewPromptTemplate template) {
         List<ReviewTaskFile> imageFiles = files.stream()
-            .filter(f -> isImageFile(f.getFileType())).collect(Collectors.toList());
+            .filter(f -> isImageFile(f.getFileType())).toList();
         List<ReviewTaskFile> docFiles = files.stream()
-            .filter(f -> isDocumentFile(f.getFileType())).collect(Collectors.toList());
+            .filter(f -> isDocumentFile(f.getFileType())).toList();
 
         if (!imageFiles.isEmpty()) {
             ReviewTaskFile imageFile = imageFiles.get(0);
@@ -288,9 +289,13 @@ public class ReviewAgent {
     private static String encodeUrlPathSegments(String rawUrl) {
         try {
             int schemeEnd = rawUrl.indexOf("://");
-            if (schemeEnd < 0) return rawUrl;
+            if (schemeEnd < 0) {
+                return rawUrl;
+            }
             int pathStart = rawUrl.indexOf('/', schemeEnd + 3);
-            if (pathStart < 0) return rawUrl;
+            if (pathStart < 0) {
+                return rawUrl;
+            }
             String prefix = rawUrl.substring(0, pathStart);
             String pathAndQuery = rawUrl.substring(pathStart);
             int qIdx = pathAndQuery.indexOf('?');
