@@ -268,20 +268,9 @@ public class ReviewTaskServiceImpl implements IReviewTaskService {
     }
 
     private void triggerExecuteIfExternal(ReviewTaskBo bo, Long taskId) {
-        if (StringUtils.isNotBlank(bo.getSourceType()) && !"manual".equals(bo.getSourceType())) {
-            if (org.springframework.transaction.support.TransactionSynchronizationManager.isSynchronizationActive()) {
-                org.springframework.transaction.support.TransactionSynchronizationManager.registerSynchronization(
-                    new org.springframework.transaction.support.TransactionSynchronization() {
-                        @Override
-                        public void afterCommit() {
-                            executeReview(taskId);
-                        }
-                    }
-                );
-            } else {
-                executeReview(taskId);
-            }
-        }
+        // 不在 createTask 内部同步/伪异步触发审核。
+        // 原因：this.executeReview() 是内部调用，@Async 代理不生效，会退化成同步执行（OCR+AI 几分钟），
+        // 导致 HTTP 请求超时。调用方（城更等外部系统）应在 createTask 返回后自行调 POST /task/{id}/execute。
     }
 
     /**
