@@ -5,10 +5,14 @@ import com.alibaba.cloud.ai.dashscope.api.DashScopeApi;
 import com.alibaba.cloud.ai.dashscope.chat.DashScopeChatOptions;
 import com.alibaba.cloud.ai.dashscope.chat.DashScopeChatModel;
 import lombok.extern.slf4j.Slf4j;
+import org.dromara.common.ai.config.OllamaProperties;
 import org.springframework.ai.chat.client.ChatClient;
 import org.springframework.ai.chat.prompt.Prompt;
 import org.springframework.ai.embedding.EmbeddingModel;
 import org.springframework.ai.model.SimpleApiKey;
+import org.springframework.ai.ollama.OllamaChatModel;
+import org.springframework.ai.ollama.api.OllamaChatOptions;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.core.io.Resource;
 import org.springframework.core.io.UrlResource;
@@ -41,6 +45,27 @@ public class AiChatService {
     private final ChatClient multiModalChatClient;
     private final DashScopeDocumentAnalysisAdvisor documentAdvisor;
     private final String dashScopeApiKey;
+
+    /**
+     * 本地 Ollama ChatClient（仅在 review.ai.local.enabled=true 时存在），未启用时为 null。
+     * 用 setter 注入而非构造器，避免与现有构造器签名冲突。
+     */
+    private ChatClient ollamaChatClient;
+    private OllamaProperties ollamaProperties;
+
+    @Autowired(required = false)
+    @org.springframework.beans.factory.annotation.Qualifier("ollamaChatModel")
+    public void setOllamaChatModel(OllamaChatModel ollamaChatModel) {
+        if (ollamaChatModel != null) {
+            this.ollamaChatClient = ChatClient.builder(ollamaChatModel).build();
+            log.info("[AiChatService] 本地 Ollama 通道已就绪");
+        }
+    }
+
+    @Autowired(required = false)
+    public void setOllamaProperties(OllamaProperties ollamaProperties) {
+        this.ollamaProperties = ollamaProperties;
+    }
 
     /**
      * 最大重试次数
@@ -390,6 +415,65 @@ public class AiChatService {
             .options(DOC_OPTIONS)
             .call()
             .content());
+    }
+
+    /**
+     * 长文本对话（本地 Ollama 通道）
+     * <p>
+     * 与 {@link #chatLong} 相同的入参契约（system + user 纯文本），但走本地大模型：
+     * - 强制 think:false（关闭思考模式，否则会浪费上千 token 做内心戏）
+     * - 强制 format:json（要求模型输出严格 JSON，便于业务侧 parseObject）
+     * - num_ctx 取自 {@link OllamaProperties#getNumCtx()}（默认 16384，4090 24GB 安全水位）
+     * - 模型名取自参数（允许业务方在 prompt 模板里指定具体型号），留空则用 properties.model
+     * <p>
+     * 失败兜底策略：直接抛异常，不自动降级到 DashScope。原因：
+     * 1. 选择本地模型本身就是出于"协议正文不上云"的隐私承诺，意外降级会破坏承诺
+     * 2. 让上层业务侧感知失败、记录任务为 failed，由人工触发重试更可控
+     *
+     * @param systemPrompt 系统提示词
+     * @param userMessage  用户消息
+     * @param model        模型名（如 qwen3.6:35b-a3b-q4_K_M），为空则用 properties.model
+     * @return AI 回复（保证为合法 JSON 字符串）
+     */
+    public String chatLongLocal(String systemPrompt, String userMessage, String model) {
+        if (ollamaChatClient == null) {
+            throw new IllegalStateException(
+                "本地 Ollama 通道未启用：请检查 review.ai.local.enabled=true 且 OllamaChatModel Bean 已注册");
+        }
+        final String sys = systemPrompt == null ? "" : systemPrompt;
+        final String usr = userMessage == null ? "" : userMessage;
+        final String resolvedModel = (model == null || model.isBlank())
+            ? ollamaProperties.getModel() : model;
+
+        log.info("[chatLongLocal] model={}, systemLen={}, userLen={}, numCtx={}, numPredict={}",
+            resolvedModel, sys.length(), usr.length(),
+            ollamaProperties.getNumCtx(), ollamaProperties.getNumPredict());
+
+        OllamaChatOptions options = OllamaChatOptions.builder()
+            .model(resolvedModel)
+            .temperature(ollamaProperties.getTemperature())
+            .topP(ollamaProperties.getTopP())
+            .numCtx(ollamaProperties.getNumCtx())
+            // 限制输出 token 数，防止本地 MoE 模型退化重复（无限生成 xxx1/xxx2/xxx3...）
+            .numPredict(ollamaProperties.getNumPredict())
+            // 强制 JSON 输出，模型遵循 schema 的能力会显著提升
+            .format("json")
+            // 关闭 thinking 模式，节省千级 token 的内心戏
+            .disableThinking()
+            .build();
+
+        // 不走 callWithRetry：429 限流策略只对 DashScope 适用，本地模型走自身重试
+        long start = System.currentTimeMillis();
+        String content = ollamaChatClient.prompt()
+            // 在 user 末尾追加 /no_think 指令做双保险（部分版本 .think(false) 不生效）
+            .system(sys)
+            .user(usr.endsWith("/no_think") ? usr : usr + "\n/no_think")
+            .options(options)
+            .call()
+            .content();
+        log.info("[chatLongLocal] 耗时 {} ms, 返回长度 {}",
+            System.currentTimeMillis() - start, content == null ? 0 : content.length());
+        return content;
     }
 
     /**

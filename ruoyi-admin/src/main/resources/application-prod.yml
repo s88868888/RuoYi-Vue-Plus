@@ -270,3 +270,21 @@ justauth:
       client-id: 10**********6
       client-secret: 1f7d08**********5b7**********29e
       redirect-uri: ${justauth.address}/social-callback?source=gitea
+
+--- # 智能审核 - 本地大模型与 OCR 配置（生产默认仍走云端，需要本地化时手动开 enabled=true）
+review:
+  ai:
+    local:
+      enabled: false
+      base-url: http://192.168.169.205:11434
+      model: qwen3.6:35b-a3b-q4_K_M
+      num-ctx: 16384
+      temperature: 0.2
+      top-p: 0.8
+      timeout-ms: 300000
+  ocr:
+    provider: qwen-vl
+    paddleocr:
+      url: http://192.168.169.205:8086/ocr
+      timeout-ms: 60000
+      confidence-threshold: 0.5

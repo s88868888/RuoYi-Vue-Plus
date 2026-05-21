@@ -40,6 +40,13 @@
             <version>1.1.2.0</version>
         </dependency>
 
+        <!-- Ollama ChatModel 支持（仅核心库，不含 starter，避免与 dashscope auto-config 冲突） -->
+        <dependency>
+            <groupId>org.springframework.ai</groupId>
+            <artifactId>spring-ai-ollama</artifactId>
+            <version>1.1.2</version>
+        </dependency>
+
         <!-- Milvus SDK -->
         <dependency>
             <groupId>io.milvus</groupId>
@@ -51,6 +58,12 @@
         <dependency>
             <groupId>com.fasterxml.jackson.core</groupId>
             <artifactId>jackson-databind</artifactId>
+        </dependency>
+
+        <dependency>
+            <groupId>com.alibaba.fastjson2</groupId>
+            <artifactId>fastjson2</artifactId>
+            <version>2.0.61</version>
         </dependency>
 
         <!-- PDF 文本层探测 + 页面渲染（用于扫描件OCR预处理） -->

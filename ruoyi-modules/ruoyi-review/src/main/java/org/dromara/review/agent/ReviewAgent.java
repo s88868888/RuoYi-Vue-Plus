@@ -7,6 +7,7 @@ import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
 import com.baomidou.mybatisplus.core.toolkit.Wrappers;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.dromara.common.ai.ocr.OcrProviderFactory;
 import org.dromara.common.ai.service.AiChatService;
 import org.dromara.common.ai.util.PdfTextExtractor;
 import org.dromara.common.oss.core.OssClient;
@@ -22,6 +23,7 @@ import org.springframework.core.io.FileSystemResource;
 import org.springframework.core.io.Resource;
 import org.springframework.stereotype.Component;
 import org.springframework.transaction.annotation.Transactional;
+import org.springframework.beans.factory.annotation.Value;
 
 import java.io.File;
 import java.nio.file.Path;
@@ -47,6 +49,7 @@ import java.util.stream.Collectors;
 public class ReviewAgent {
 
     private final AiChatService aiChatService;
+    private final OcrProviderFactory ocrProviderFactory;
     private final ISysOssService ossService;
     private final ReviewTaskMapper taskMapper;
     private final ReviewTaskFileMapper taskFileMapper;
@@ -60,6 +63,16 @@ public class ReviewAgent {
     private final ReviewStandardKnowledgeMapper standardKnowledgeMapper;
     private final ReviewKnowledgePatternMapper knowledgePatternMapper;
     private final ReviewKnowledgeMapper knowledgeMapper;
+
+    /** 回调签名共享密钥，外部系统验签必须用相同值 */
+    @Value("${review.webhook.secret:}")
+    private String webhookSecret;
+    /** 单次回调 HTTP 超时（毫秒） */
+    @Value("${review.webhook.timeout-ms:10000}")
+    private long webhookTimeoutMs;
+    /** 失败重试次数（指数退避：2s/5s/10s） */
+    @Value("${review.webhook.max-retries:3}")
+    private int webhookMaxRetries;
 
     @Transactional(rollbackFor = Exception.class)
     public void execute(Long taskId) {
@@ -95,13 +108,29 @@ public class ReviewAgent {
 
             // 5. 组装 Prompt
             String outputFormat = template.getOutputFormat() != null ? template.getOutputFormat() : "";
-            String ruleCountConstraint = "\n\n【重要约束】本次审核共有 " + allRules.size() + " 条规则，你必须对每一条规则都给出审核结论，" +
-                "items 数组中的条目数量必须等于 " + allRules.size() + "。即使某条规则检查通过无问题，也必须返回该条目并标记 match_status 为 matched。不允许遗漏任何规则。\n" +
-                "【summary 约束】summary 必须严格基于 items 的实际审核结果来总结，不得与 items 结论矛盾。如果所有 items 的 match_status 都是 matched，summary 不得提及任何不一致或需核查的问题。\n";
+
+            // 构建 field_name 白名单（取规则的 check_field，没有就用 rule_<id>）
+            // 提示词模板里可用 {field_whitelist} 占位符引用，让运营在 DB 里灵活组织约束语
+            StringBuilder whitelistSb = new StringBuilder();
+            for (int i = 0; i < allRules.size(); i++) {
+                ReviewStandardRule r = allRules.get(i);
+                String field = (r.getCheckField() != null && !r.getCheckField().isBlank())
+                    ? r.getCheckField() : "rule_" + r.getId();
+                whitelistSb.append("  ").append(i + 1).append(". \"").append(field).append("\"");
+                if (r.getCategory() != null && !r.getCategory().isBlank()) {
+                    whitelistSb.append("  // ").append(r.getCategory());
+                }
+                whitelistSb.append("\n");
+            }
+            String fieldWhitelist = whitelistSb.toString();
+            String ruleCount = String.valueOf(allRules.size());
+
             String systemPrompt = template.getSystemPrompt()
-                .replace("{rules}", rulesText + ruleCountConstraint)
+                .replace("{rules}", rulesText)
                 .replace("{knowledge_context}", knowledgeContext)
-                .replace("{output_format}", outputFormat);
+                .replace("{output_format}", outputFormat)
+                .replace("{field_whitelist}", fieldWhitelist)
+                .replace("{rule_count}", ruleCount);
 
             String userPrompt = template.getUserPrompt()
                 .replace("{form_data}", task.getFormSnapshot() != null ? task.getFormSnapshot() : "{}")
@@ -126,8 +155,8 @@ public class ReviewAgent {
             // 9. 聚合问题模式（同类问题出现≥3次自动归纳）
             aggregatePatterns(task, standardIds);
 
-            // 10. 回调外部系统
-           // callbackExternalSystem(task);
+            // 10. 回调外部系统（成功路径）
+            try { callbackExternalSystem(task); } catch (Exception ex) { log.warn("[ReviewAgent] 成功路径回调失败 taskId={}", taskId, ex); }
 
             log.info("[ReviewAgent] 审核完成: taskId={}, passStatus={}, score={}, model={}, 耗时={}ms",
                 taskId, task.getPassStatus(), task.getScore(), modelUsed, duration);
@@ -139,15 +168,22 @@ public class ReviewAgent {
             taskMapper.updateById(task);
             // 失败也回调
             try { callbackExternalSystem(task); } catch (Exception ex) { log.warn("回调失败", ex); }
-            throw e;
+            // 不再 throw e：上层 @Async 调用方除了把异常丢给 SimpleAsyncUncaughtExceptionHandler 多打一遍日志外
+            // 没有任何处理；而 throw 会触发 @Transactional(rollbackFor=Exception.class) 回滚，
+            // 导致刚刚 setStatus("failed") + updateById 也被一起撤销，DB 永远停在 "reviewing/pending"。
+            // 失败应该让事务正常提交，把 failed 状态和 aiSummary（含异常信息）落库供运营排查。
         }
     }
 
     /**
      * 根据附件类型自动选择 AI 调用方式：
      * - 有图片附件 → qwen-vl 视觉模型（当前取第一张）
-     * - 有文档附件 → 每份PDF探测文本层，打印件直接抽文本，扫描件逐页OCR；最终用 qwen-long 做纯文本比对
+     * - 有文档附件 → 每份PDF探测文本层，打印件直接抽文本，扫描件逐页OCR；最终用 qwen-long / 本地大模型 做纯文本比对
      * - 无附件 → qwen-plus 文本模型
+     * <p>
+     * 文档审核场景下，通过 {@code template.modelName} 字段路由：
+     * - 留空 / 任意 dashscope 模型名 → 走云端 qwen-long（chatLong）
+     * - 以 {@code ollama:} 为前缀（如 {@code ollama:qwen3.6:35b-a3b-q4_K_M}） → 走本地 Ollama（chatLongLocal）
      */
     private String callAi(List<ReviewTaskFile> files, String systemPrompt, String userPrompt, ReviewPromptTemplate template) {
         List<ReviewTaskFile> imageFiles = files.stream()
@@ -179,9 +215,15 @@ public class ReviewAgent {
                         .append(f.getFileName() == null ? "未命名" : f.getFileName()).append("】\n")
                         .append(docText).append("\n\n");
                 }
-                // 把"两份/多份文档的纯文本"作为正文，与原本的 userPrompt（业务指令、规则等）拼起来
                 String enrichedUser = docsBlock + "\n=== 审核任务指令 ===\n" + userPrompt;
                 log.info("[ReviewAgent] 文档预处理完成，文本总长度={}", enrichedUser.length());
+
+                String modelName = template.getModelName();
+                if (modelName != null && modelName.startsWith("ollama:")) {
+                    String localModel = modelName.substring("ollama:".length());
+                    log.info("[ReviewAgent] 路由到本地 Ollama: {}", localModel);
+                    return aiChatService.chatLongLocal(systemPrompt, enrichedUser, localModel);
+                }
                 return aiChatService.chatLong(systemPrompt, enrichedUser);
             } catch (Exception e) {
                 log.error("[ReviewAgent] 文档预处理或审核失败: {}", e.getMessage(), e);
@@ -217,7 +259,8 @@ public class ReviewAgent {
             return text;
         }
 
-        log.info("[ReviewAgent] {} 为扫描件，逐页OCR开始", taskFile.getFileName());
+        log.info("[ReviewAgent] {} 为扫描件，逐页OCR开始 (provider={})",
+            taskFile.getFileName(), ocrProviderFactory.get().getName());
         List<byte[]> pages = PdfTextExtractor.renderPagesToPng(pdfFile);
         StringBuilder sb = new StringBuilder();
         for (int p = 0; p < pages.size(); p++) {
@@ -227,7 +270,7 @@ public class ReviewAgent {
                 @Override
                 public String getFilename() { return "page-" + pageNo + ".png"; }
             };
-            String pageText = aiChatService.ocrImage(pageRes);
+            String pageText = ocrProviderFactory.get().ocr(pageRes);
             sb.append("--- 第").append(pageNo).append("页 ---\n").append(pageText).append("\n");
             log.info("[ReviewAgent] {} 第{}页OCR完成，识别 {} 字符",
                 taskFile.getFileName(), pageNo, pageText == null ? 0 : pageText.length());
@@ -320,7 +363,14 @@ public class ReviewAgent {
         boolean hasImage = files.stream().anyMatch(f -> isImageFile(f.getFileType()));
         if (hasImage) return "qwen3-vl-plus";
         boolean hasDoc = files.stream().anyMatch(f -> isDocumentFile(f.getFileType()));
-        if (hasDoc) return "qwen-long";
+        if (hasDoc) {
+            // 文档场景下 model_name 字段决定走云端还是本地
+            String modelName = template.getModelName();
+            if (modelName != null && modelName.startsWith("ollama:")) {
+                return modelName;
+            }
+            return "qwen-long";
+        }
         if (template.getModelName() != null && !template.getModelName().isBlank()) {
             return template.getModelName();
         }
@@ -426,17 +476,184 @@ public class ReviewAgent {
                 jsonStr = jsonStr.substring(start, end + 1);
             }
         }
+        // 第1次：严格解析
         try {
             return JSON.parseObject(jsonStr);
-        } catch (Exception e) {
-            log.warn("[ReviewAgent] AI返回非标准JSON，尝试提取");
+        } catch (Exception strictErr) {
+            // 第2次：截取最大 {...} 区间再试（处理外围有 markdown / 解释文字）
             int start = aiResponse.indexOf("{");
             int end = aiResponse.lastIndexOf("}");
-            if (start >= 0 && end > start) {
-                return JSON.parseObject(aiResponse.substring(start, end + 1));
+            String extracted = (start >= 0 && end > start) ? aiResponse.substring(start, end + 1) : jsonStr;
+            try {
+                return JSON.parseObject(extracted);
+            } catch (Exception extractErr) {
+                // 第3次：转义字符串内 0x00-0x1F 控制字符
+                // 本地 Ollama JSON mode 偶尔会让原始换行/Tab 跑进字符串值里，违反 RFC 8259
+                log.warn("[ReviewAgent] JSON 解析失败({})，尝试转义控制字符后重试", extractErr.getMessage());
+                String sanitized = escapeControlCharsInJsonStrings(extracted);
+                try {
+                    return JSON.parseObject(sanitized);
+                } catch (Exception sanitizeErr) {
+                    // 第4次：抢救截断的 JSON（本地 MoE 模型经常输出超过 num_predict 上限被截）
+                    // 思路：从原始响应里逐个抽取完整的 {…} 对象（用栈匹配大括号），凑出一个合法 items 数组
+                    log.warn("[ReviewAgent] 转义后仍无法解析({})，尝试从截断 JSON 中抢救 items", sanitizeErr.getMessage());
+                    JSONObject salvaged = salvageTruncatedJson(aiResponse);
+                    if (salvaged != null) {
+                        log.warn("[ReviewAgent] 抢救成功，items 数={}，summary={}",
+                            salvaged.getJSONArray("items") == null ? 0 : salvaged.getJSONArray("items").size(),
+                            salvaged.getString("summary") == null ? "" : salvaged.getString("summary").substring(0, Math.min(80, salvaged.getString("summary").length())));
+                        return salvaged;
+                    }
+                    int previewLen = Math.min(500, aiResponse.length());
+                    log.error("[ReviewAgent] 抢救失败，无法解析。响应长度={}, 前{}字符:\n{}",
+                        aiResponse.length(), previewLen, aiResponse.substring(0, previewLen));
+                    throw new RuntimeException("无法解析AI审核结果（控制字符转义 + 截断抢救均失败）: "
+                        + sanitizeErr.getMessage(), sanitizeErr);
+                }
             }
-            throw new RuntimeException("无法解析AI审核结果", e);
         }
+    }
+
+    /**
+     * 抢救被截断的 JSON：扫描原始响应，按大括号深度匹配抽出完整 item 对象，
+     * 组装出一个最小可用的结果 JSON：{summary, pass_status, score, items}
+     * <p>
+     * 适用场景：本地模型 num_predict 上限触发，输出在 items 数组中间被切断，
+     * 末尾几个 item 不完整。strict parser 拒绝整个文档，但前面 N 个完整的 item
+     * 已经包含有价值的审核结论，丢掉太可惜。
+     */
+    private JSONObject salvageTruncatedJson(String raw) {
+        if (raw == null || raw.isEmpty()) return null;
+        // 抽取顶层 summary / pass_status / score（这些通常在 JSON 开头，截断前已完整）
+        String summary = extractTopLevelString(raw, "summary");
+        String passStatus = extractTopLevelString(raw, "pass_status");
+        Integer score = extractTopLevelInt(raw, "score");
+
+        // 扫描 items 数组：找到 "items" 后的第一个 [，然后用大括号深度匹配抽出每一个完整的 {...}
+        int itemsKey = raw.indexOf("\"items\"");
+        if (itemsKey < 0) return null;
+        int arrStart = raw.indexOf('[', itemsKey);
+        if (arrStart < 0) return null;
+
+        JSONArray items = new JSONArray();
+        int depth = 0;
+        int objStart = -1;
+        boolean inString = false;
+        boolean prevBackslash = false;
+        for (int i = arrStart + 1; i < raw.length(); i++) {
+            char c = raw.charAt(i);
+            if (inString) {
+                if (prevBackslash) { prevBackslash = false; }
+                else if (c == '\\') { prevBackslash = true; }
+                else if (c == '"') { inString = false; }
+                continue;
+            }
+            if (c == '"') { inString = true; continue; }
+            if (c == '{') {
+                if (depth == 0) objStart = i;
+                depth++;
+            } else if (c == '}') {
+                depth--;
+                if (depth == 0 && objStart >= 0) {
+                    String objStr = raw.substring(objStart, i + 1);
+                    objStr = escapeControlCharsInJsonStrings(objStr);
+                    try {
+                        items.add(JSON.parseObject(objStr));
+                    } catch (Exception ignore) {
+                        // 单个 item 解析失败就跳过，不影响其他
+                    }
+                    objStart = -1;
+                }
+            } else if (c == ']' && depth == 0) {
+                break;
+            }
+        }
+
+        if (items.isEmpty() && summary == null && passStatus == null && score == null) {
+            return null;
+        }
+
+        JSONObject result = new JSONObject();
+        if (summary != null) result.put("summary", summary);
+        if (passStatus != null) result.put("pass_status", passStatus);
+        if (score != null) result.put("score", score);
+        result.put("items", items);
+        // 标记为抢救结果，供上层 aiSummary 追加提示
+        result.put("_salvaged", true);
+        return result;
+    }
+
+    /** 从 JSON 字符串里抽取顶层 string 字段（容忍尾部截断）。失败返回 null。 */
+    private String extractTopLevelString(String raw, String key) {
+        String pattern = "\"" + key + "\"\\s*:\\s*\"";
+        java.util.regex.Matcher m = java.util.regex.Pattern.compile(pattern).matcher(raw);
+        if (!m.find()) return null;
+        int start = m.end();
+        // 找未转义的右引号
+        boolean prevBackslash = false;
+        for (int i = start; i < raw.length(); i++) {
+            char c = raw.charAt(i);
+            if (prevBackslash) { prevBackslash = false; continue; }
+            if (c == '\\') { prevBackslash = true; continue; }
+            if (c == '"') {
+                return raw.substring(start, i)
+                    .replace("\\n", "\n").replace("\\\"", "\"").replace("\\\\", "\\");
+            }
+        }
+        // 没找到右引号 → 截断，返回到末尾的内容
+        return raw.substring(start)
+            .replace("\\n", "\n").replace("\\\"", "\"").replace("\\\\", "\\");
+    }
+
+    /** 从 JSON 字符串里抽取顶层 int 字段。失败返回 null。 */
+    private Integer extractTopLevelInt(String raw, String key) {
+        String pattern = "\"" + key + "\"\\s*:\\s*(-?\\d+)";
+        java.util.regex.Matcher m = java.util.regex.Pattern.compile(pattern).matcher(raw);
+        if (m.find()) {
+            try { return Integer.parseInt(m.group(1)); } catch (NumberFormatException ignore) { }
+        }
+        return null;
+    }
+
+    /**
+     * 把字符串字面值（双引号包围）内的 0x00-0x1F 控制字符替换成 JSON 合法转义。
+     * 字符串外的 \n \t \r（用作分隔符空白）保持原样。
+     * 处理 \" 等已转义的引号，避免误判字符串边界。
+     */
+    private static String escapeControlCharsInJsonStrings(String input) {
+        StringBuilder sb = new StringBuilder(input.length() + 64);
+        boolean inString = false;
+        boolean prevBackslash = false;
+        for (int i = 0; i < input.length(); i++) {
+            char c = input.charAt(i);
+            if (inString) {
+                if (prevBackslash) {
+                    sb.append(c);
+                    prevBackslash = false;
+                } else if (c == '\\') {
+                    sb.append(c);
+                    prevBackslash = true;
+                } else if (c == '"') {
+                    sb.append(c);
+                    inString = false;
+                } else if (c < 0x20) {
+                    switch (c) {
+                        case '\n': sb.append("\\n"); break;
+                        case '\r': sb.append("\\r"); break;
+                        case '\t': sb.append("\\t"); break;
+                        case '\b': sb.append("\\b"); break;
+                        case '\f': sb.append("\\f"); break;
+                        default: sb.append(String.format("\\u%04x", (int) c)); break;
+                    }
+                } else {
+                    sb.append(c);
+                }
+            } else {
+                sb.append(c);
+                if (c == '"') inString = true;
+            }
+        }
+        return sb.toString();
     }
 
     private void saveResultItems(ReviewTask task, JSONObject result, List<ReviewStandardRule> rules) {
@@ -884,51 +1101,126 @@ public class ReviewAgent {
     // ==================== 外部系统回调 ====================
 
     /**
-     * 审核完成后回调外部系统（如商会系统）
-     * 根据 sourceType 路由到对应的回调地址
+     * 审核完成后回调外部系统（替代调用方轮询）。
+     * <p>
+     * URL 优先级：task.callbackUrl（调用方传入）→ resolveCallbackUrl(sourceType)（兜底硬编码）。
+     * 安全：HMAC-SHA256 签名 + 时间戳，外部系统验签防伪造/防重放。
+     * 重试：失败时指数退避（2s/5s/10s），最多 3 次。
+     * Payload：含 status/passStatus/score/errorCount/warningCount/infoCount/aiSummary/items。
      */
     private void callbackExternalSystem(ReviewTask task) {
         if (task.getSourceType() == null || task.getSourceId() == null) {
             return;
         }
-        String callbackUrl = resolveCallbackUrl(task.getSourceType());
-        if (callbackUrl == null) {
+        String callbackUrl = task.getCallbackUrl();
+        if (callbackUrl == null || callbackUrl.isBlank()) {
+            callbackUrl = resolveCallbackUrl(task.getSourceType());
+        }
+        if (callbackUrl == null || callbackUrl.isBlank()) {
+            log.debug("[ReviewAgent] 任务 {} 无回调地址，跳过", task.getId());
             return;
         }
-        try {
-            JSONObject payload = new JSONObject();
-            payload.put("taskId", task.getId());
-            payload.put("sourceId", task.getSourceId());
-            payload.put("sourceType", task.getSourceType());
-            payload.put("status", task.getStatus());
-            payload.put("passStatus", task.getPassStatus());
-            payload.put("score", task.getScore());
-            payload.put("aiSummary", task.getAiSummary());
-            payload.put("errorCount", task.getErrorCount());
-            payload.put("warningCount", task.getWarningCount());
-            payload.put("version", task.getVersion());
 
-            java.net.http.HttpClient client = java.net.http.HttpClient.newBuilder()
-                .connectTimeout(java.time.Duration.ofSeconds(5))
-                .build();
-            java.net.http.HttpRequest request = java.net.http.HttpRequest.newBuilder()
-                .uri(java.net.URI.create(callbackUrl))
-                .timeout(java.time.Duration.ofSeconds(10))
-                .header("Content-Type", "application/json")
-                .POST(java.net.http.HttpRequest.BodyPublishers.ofString(payload.toJSONString()))
-                .build();
-            java.net.http.HttpResponse<String> resp = client.send(request,
-                java.net.http.HttpResponse.BodyHandlers.ofString());
-            log.info("[ReviewAgent] 回调外部系统成功: url={}, taskId={}, status={}",
-                callbackUrl, task.getId(), resp.statusCode());
+        // 拉取审核明细，连同结果一起回调
+        List<ReviewResultItem> items = resultItemMapper.selectList(
+            Wrappers.<ReviewResultItem>lambdaQuery().eq(ReviewResultItem::getTaskId, task.getId())
+                .orderByAsc(ReviewResultItem::getSortOrder));
+
+        JSONObject payload = new JSONObject();
+        payload.put("taskId", task.getId());
+        payload.put("sourceId", task.getSourceId());
+        payload.put("sourceType", task.getSourceType());
+        payload.put("status", task.getStatus());
+        payload.put("passStatus", task.getPassStatus());
+        payload.put("score", task.getScore());
+        payload.put("errorCount", task.getErrorCount());
+        payload.put("warningCount", task.getWarningCount());
+        payload.put("infoCount", task.getInfoCount());
+        payload.put("aiSummary", task.getAiSummary());
+        payload.put("aiModel", task.getAiModel());
+        payload.put("version", task.getVersion());
+        payload.put("reviewDuration", task.getReviewDuration());
+
+        JSONArray itemArr = new JSONArray();
+        if (items != null) {
+            for (ReviewResultItem it : items) {
+                JSONObject o = new JSONObject();
+                o.put("fieldName", it.getFieldName());
+                o.put("fieldLabel", it.getFieldLabel());
+                o.put("formValue", it.getFormValue());
+                o.put("extractedValue", it.getExtractedValue());
+                o.put("matchStatus", it.getMatchStatus());
+                o.put("severity", it.getSeverity());
+                o.put("confidence", it.getConfidence());
+                o.put("location", it.getLocation());
+                o.put("description", it.getDescription());
+                o.put("suggestion", it.getSuggestion());
+                itemArr.add(o);
+            }
+        }
+        payload.put("items", itemArr);
+
+        String body = payload.toJSONString();
+        String timestamp = String.valueOf(System.currentTimeMillis());
+        String signature = sign(timestamp + "." + body, webhookSecret);
+
+        java.net.http.HttpClient client = java.net.http.HttpClient.newBuilder()
+            .connectTimeout(java.time.Duration.ofSeconds(5))
+            .build();
+        java.net.http.HttpRequest request = java.net.http.HttpRequest.newBuilder()
+            .uri(java.net.URI.create(callbackUrl))
+            .timeout(java.time.Duration.ofMillis(webhookTimeoutMs))
+            .header("Content-Type", "application/json")
+            .header("X-Review-Timestamp", timestamp)
+            .header("X-Review-Signature", signature)
+            .POST(java.net.http.HttpRequest.BodyPublishers.ofString(body))
+            .build();
+
+        long[] backoffMs = {2000L, 5000L, 10000L};
+        int maxAttempts = Math.max(1, webhookMaxRetries);
+        for (int attempt = 1; attempt <= maxAttempts; attempt++) {
+            try {
+                java.net.http.HttpResponse<String> resp = client.send(request,
+                    java.net.http.HttpResponse.BodyHandlers.ofString());
+                if (resp.statusCode() >= 200 && resp.statusCode() < 300) {
+                    log.info("[ReviewAgent] 回调成功 url={}, taskId={}, attempt={}",
+                        callbackUrl, task.getId(), attempt);
+                    return;
+                }
+                log.warn("[ReviewAgent] 回调返回非2xx url={}, taskId={}, status={}, body={}",
+                    callbackUrl, task.getId(), resp.statusCode(),
+                    resp.body() == null ? "" : resp.body().substring(0, Math.min(200, resp.body().length())));
+            } catch (Exception e) {
+                log.warn("[ReviewAgent] 回调异常 url={}, taskId={}, attempt={}/{}, err={}",
+                    callbackUrl, task.getId(), attempt, maxAttempts, e.getMessage());
+            }
+            if (attempt < maxAttempts) {
+                try { Thread.sleep(backoffMs[Math.min(attempt - 1, backoffMs.length - 1)]); }
+                catch (InterruptedException ie) { Thread.currentThread().interrupt(); return; }
+            }
+        }
+        log.error("[ReviewAgent] 回调最终失败 url={}, taskId={}, attempts={}", callbackUrl, task.getId(), maxAttempts);
+    }
+
+    /**
+     * HMAC-SHA256 签名，hex 输出。secret 为空时退化为空串（仅开发环境）。
+     */
+    private String sign(String message, String secret) {
+        if (secret == null || secret.isBlank()) return "";
+        try {
+            javax.crypto.Mac mac = javax.crypto.Mac.getInstance("HmacSHA256");
+            mac.init(new javax.crypto.spec.SecretKeySpec(secret.getBytes(java.nio.charset.StandardCharsets.UTF_8), "HmacSHA256"));
+            byte[] raw = mac.doFinal(message.getBytes(java.nio.charset.StandardCharsets.UTF_8));
+            StringBuilder sb = new StringBuilder(raw.length * 2);
+            for (byte b : raw) sb.append(String.format("%02x", b));
+            return sb.toString();
         } catch (Exception e) {
-            log.warn("[ReviewAgent] 回调外部系统失败: sourceType={}, taskId={}, err={}",
-                task.getSourceType(), task.getId(), e.getMessage());
+            throw new RuntimeException("签名失败", e);
         }
     }
 
     /**
-     * 根据 sourceType 解析回调地址
+     * 兜底回调地址（调用方未传 callbackUrl 时按 sourceType 路由）
      */
     private String resolveCallbackUrl(String sourceType) {
         return switch (sourceType) {

@@ -86,6 +86,11 @@ public class ReviewTaskBo extends BaseEntity {
      */
     private String remark;
 
+    /**
+     * 外部系统回调地址（任务完成后POST通知，替代轮询）
+     */
+    private String callbackUrl;
+
     @Data
     public static class TaskFileBo {
         private Long ossId;

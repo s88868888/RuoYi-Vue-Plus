@@ -334,3 +334,42 @@ spring:
         model: text-embedding-v4
         # 是否启用
         enabled: true
+
+--- # 智能审核 - 本地大模型与 OCR 配置
+review:
+  # 文本对比阶段的本地 Ollama 通道
+  ai:
+    local:
+      # 是否启用本地 Ollama 通道（启用后才会注册 OllamaChatModel Bean）
+      enabled: true
+      # Ollama 服务地址（4090 服务器，已部署 qwen3.6:35b-a3b-q4_K_M）
+      base-url: http://192.168.169.205:11434
+      # 默认模型（prompt 模板的 model_name 留空时使用）
+      model: qwen3.6:35b-a3b-q4_K_M
+      # 上下文窗口（token 数），4090 24GB + flash-attn 推荐 32768，prompt+output 都吃这里
+      num-ctx: 32768
+      # 单次推理输出 token 上限（防止本地 MoE 模型退化重复无限生成）
+      num-predict: 8000
+      # 温度参数，审核场景需要稳定输出
+      temperature: 0.2
+      # top_p
+      top-p: 0.8
+      # 调用超时时间（毫秒），35B 模型生成 18 页 JSON 约 30~60 秒，5 分钟封顶
+      timeout-ms: 300000
+  # 扫描件 OCR 阶段
+  ocr:
+    # 当前 Provider，可选：qwen-vl（云端，默认）/ paddleocr（本地）
+    provider: paddleocr
+    # PaddleOCR 配置（provider=paddleocr 时启用）
+    paddleocr:
+      url: http://192.168.169.205:8086/ocr
+      timeout-ms: 60000
+      confidence-threshold: 0.5
+  # 任务完成 Webhook 回调（替代调用方轮询）
+  webhook:
+    # 共享密钥，外部系统验签时必须使用同一个值
+    secret: cs-review-webhook-secret-2026
+    # HTTP 客户端超时（毫秒）
+    timeout-ms: 10000
+    # 失败重试次数（指数退避：2s / 5s / 10s）
+    max-retries: 3

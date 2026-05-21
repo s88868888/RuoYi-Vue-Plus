@@ -3,6 +3,7 @@ package org.dromara.system.controller.ai;
 import cn.dev33.satoken.annotation.SaCheckPermission;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+
 import org.dromara.common.ai.domain.VectorSearchResult;
 import org.dromara.common.ai.service.CompanyVectorService;
 import org.dromara.common.core.domain.R;

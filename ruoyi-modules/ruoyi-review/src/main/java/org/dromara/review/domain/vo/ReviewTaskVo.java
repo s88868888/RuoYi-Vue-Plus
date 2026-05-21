@@ -170,6 +170,11 @@ public class ReviewTaskVo implements Serializable {
     private String remark;
 
     /**
+     * 外部系统回调地址
+     */
+    private String callbackUrl;
+
+    /**
      * 创建时间
      */
     @ExcelProperty(value = "创建时间")
