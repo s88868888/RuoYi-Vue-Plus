@@ -55,9 +55,20 @@ public class ReviewPromptTemplate extends TenantEntity {
     private String outputFormat;
 
     /**
-     * 模型名称
+     * 模型名称（legacy，新版用 modelConfigId 取代；保留做兜底回退）
      */
     private String modelName;
+
+    /**
+     * AI模型配置ID（关联 review_model_config，purpose=chat）
+     */
+    private Long modelConfigId;
+
+    /**
+     * OCR模型配置ID（关联 review_model_config，purpose=ocr）
+     * 扫描件 OCR 用此配置；为空时回退到全局最早 enabled 的 OCR 配置
+     */
+    private Long ocrConfigId;
 
     /**
      * 温度参数

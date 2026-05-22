@@ -32,6 +32,8 @@ import org.dromara.review.mapper.ReviewTaskFileMapper;
 import org.dromara.review.mapper.ReviewTaskMapper;
 import org.dromara.review.mapper.ReviewTaskStandardMapper;
 import org.dromara.review.service.IReviewTaskService;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.context.ApplicationContext;
 import org.springframework.scheduling.annotation.Async;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
@@ -63,6 +65,17 @@ public class ReviewTaskServiceImpl implements IReviewTaskService {
     private final ReviewStandardRuleMapper standardRuleMapper;
     private final ReviewAgent reviewAgent;
     private final ReviewRagService reviewRagService;
+
+    /**
+     * 通过 ApplicationContext 拿到自身代理对象，用于绕过 @Async 在内部调用时失效的问题。
+     * 用 setter + @Autowired 而不是构造器注入，避免循环依赖。
+     */
+    private ApplicationContext applicationContext;
+
+    @Autowired
+    public void setApplicationContext(ApplicationContext applicationContext) {
+        this.applicationContext = applicationContext;
+    }
 
     /**
      * 查询审核任务详情（附带文件列表和标准名称）
@@ -268,9 +281,18 @@ public class ReviewTaskServiceImpl implements IReviewTaskService {
     }
 
     private void triggerExecuteIfExternal(ReviewTaskBo bo, Long taskId) {
-        // 不在 createTask 内部同步/伪异步触发审核。
-        // 原因：this.executeReview() 是内部调用，@Async 代理不生效，会退化成同步执行（OCR+AI 几分钟），
-        // 导致 HTTP 请求超时。调用方（城更等外部系统）应在 createTask 返回后自行调 POST /task/{id}/execute。
+        // autoExecute=true 时通过 ApplicationContext 拿代理触发异步审核（不会阻塞调用方）
+        // 没传 autoExecute 时保持旧行为：调用方需要自己调 POST /task/{id}/execute
+        if (Boolean.TRUE.equals(bo.getAutoExecute())) {
+            try {
+                IReviewTaskService self = applicationContext.getBean(IReviewTaskService.class);
+                self.executeReview(taskId);
+                log.info("[ReviewTask] autoExecute=true，已异步触发审核 taskId={}", taskId);
+            } catch (Exception e) {
+                log.warn("[ReviewTask] autoExecute 触发失败 taskId={}, err={}（不影响任务创建，可手动调 execute 重试）",
+                    taskId, e.getMessage());
+            }
+        }
     }
 
     /**

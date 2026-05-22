@@ -59,9 +59,19 @@ public class ReviewPromptTemplateBo extends BaseEntity {
     private String outputFormat;
 
     /**
-     * 模型名称
+     * 模型名称（legacy）
      */
     private String modelName;
+
+    /**
+     * AI模型配置ID（关联 review_model_config，purpose=chat）
+     */
+    private Long modelConfigId;
+
+    /**
+     * OCR模型配置ID（关联 review_model_config，purpose=ocr）
+     */
+    private Long ocrConfigId;
 
     /**
      * 温度参数

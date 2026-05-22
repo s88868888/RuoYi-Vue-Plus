@@ -373,3 +373,8 @@ review:
     timeout-ms: 10000
     # 失败重试次数（指数退避：2s / 5s / 10s）
     max-retries: 3
+  # 外部系统接入相关
+  external:
+    # 外部传 filePath 是相对路径时，拼接的 base URL（绝对 http(s):// URL 不动）
+    # 留空则强制要求外部传完整 URL，相对路径会直接报错
+    file-base-url: http://192.168.169.47:9004/

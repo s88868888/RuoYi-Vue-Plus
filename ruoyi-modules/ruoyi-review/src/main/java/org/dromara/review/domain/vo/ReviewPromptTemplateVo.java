@@ -62,10 +62,22 @@ public class ReviewPromptTemplateVo implements Serializable {
     private String outputFormat;
 
     /**
-     * 模型名称
+     * 模型名称（legacy）
      */
     @ExcelProperty(value = "模型名称")
     private String modelName;
+
+    /**
+     * AI模型配置ID（关联 review_model_config，purpose=chat）
+     */
+    @ExcelProperty(value = "AI模型配置ID")
+    private Long modelConfigId;
+
+    /**
+     * OCR模型配置ID（关联 review_model_config，purpose=ocr）
+     */
+    @ExcelProperty(value = "OCR模型配置ID")
+    private Long ocrConfigId;
 
     /**
      * 温度参数

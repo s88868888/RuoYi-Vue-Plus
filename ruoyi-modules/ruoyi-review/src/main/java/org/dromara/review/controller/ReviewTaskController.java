@@ -65,6 +65,20 @@ public class ReviewTaskController extends BaseController {
     }
 
     /**
+     * 一键创建并立即异步执行审核（外部系统接入推荐入口）
+     * <p>
+     * 等价于 add(bo) 时强制 autoExecute=true，省一次 RPC。
+     * 接口立刻返回 taskId，AI 审核在后台异步跑，完成后通过 callbackUrl 回调。
+     */
+    @Log(title = "创建并执行审核", businessType = BusinessType.INSERT)
+    @RepeatSubmit()
+    @PostMapping("/createAndExecute")
+    public R<Long> createAndExecute(@Validated(AddGroup.class) @RequestBody ReviewTaskBo bo) {
+        bo.setAutoExecute(true);
+        return R.ok(reviewTaskService.createTask(bo));
+    }
+
+    /**
      * 触发AI审核
      *
      * @param id 任务ID

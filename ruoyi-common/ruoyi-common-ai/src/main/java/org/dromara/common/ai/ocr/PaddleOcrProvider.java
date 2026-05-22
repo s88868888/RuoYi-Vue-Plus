@@ -5,7 +5,7 @@ import com.alibaba.fastjson2.JSONArray;
 import com.alibaba.fastjson2.JSONObject;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
-import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
+import org.dromara.common.ai.dto.AiModelConfigDto;
 import org.springframework.core.io.Resource;
 import org.springframework.http.HttpEntity;
 import org.springframework.http.HttpHeaders;
@@ -20,44 +20,28 @@ import java.time.Duration;
 import java.util.Base64;
 import java.util.HashMap;
 import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
 
 /**
- * 本地 PaddleX serve OCR 实现（PP-OCRv5）
+ * 本地 PaddleX serve OCR 实现（PP-OCRv5）。
  * <p>
- * 调用 PaddleX serve 的 {@code POST /ocr} 接口，入参为 base64 编码的图片，返回包含
- * {@code prunedResult.rec_texts} 与 {@code rec_scores} 的结构化结果。
+ * 当前优先级：DB 配置（review_model_config purpose=ocr provider=paddleocr）
+ * → yml 配置（review.ocr.paddleocr.*）兜底。
  * <p>
- * 部署方式（4090 服务器，CPU 推理就够）：
- * <pre>
- * # 1. 起一个 PaddleX 容器
- * docker run -d --name paddlex-serve -p 8080:8080 \
- *   --restart unless-stopped \
- *   ccr-2vdh3abv-pub.cnc.bj.baidubce.com/paddlex/paddlex:paddlex3.0.0-paddlepaddle3.0.0-cpu \
- *   tail -f /dev/null
- *
- * # 2. 安装 OCR 依赖 + 启动 serve
- * docker exec -d paddlex-serve bash -c \
- *   "pip install -U paddleocr && \
- *    paddlex --serve --pipeline OCR --host 0.0.0.0 --port 8080"
- *
- * # 3. 验证
- * curl -X POST http://localhost:8080/ocr \
- *   -H 'Content-Type: application/json' \
- *   -d "{\"file\":\"$(base64 -w0 test.png)\",\"fileType\":1}"
- * </pre>
- * <p>
- * 仅在 {@code review.ocr.provider=paddleocr} 时注册，避免无服务时启动报错。
+ * 不再使用 {@code @ConditionalOnProperty}，无条件注册到容器，由 {@link OcrProviderFactory}
+ * 根据运行时配置动态选取 / 切换。
  */
 @Slf4j
 @Component
 @RequiredArgsConstructor
-@ConditionalOnProperty(prefix = "review.ocr", name = "provider", havingValue = "paddleocr")
 public class PaddleOcrProvider implements OcrProvider {
 
     public static final String NAME = "paddleocr";
 
     private final OcrProperties properties;
-    private RestTemplate restTemplate;
+
+    /** 按 (url, timeoutMs) 缓存 RestTemplate 实例，配置变更时重建 */
+    private final Map<String, RestTemplate> restTemplateCache = new ConcurrentHashMap<>();
 
     @Override
     public String getName() {
@@ -66,7 +50,23 @@ public class PaddleOcrProvider implements OcrProvider {
 
     @Override
     public String ocr(Resource imageResource) {
+        return ocr(imageResource, null);
+    }
+
+    @Override
+    public String ocr(Resource imageResource, AiModelConfigDto override) {
         long start = System.currentTimeMillis();
+
+        // 解析运行时参数：DB 配置优先，yml 兜底
+        String url = (override != null && override.getBaseUrl() != null && !override.getBaseUrl().isBlank())
+            ? override.getBaseUrl()
+            : properties.getPaddleocr().getUrl();
+        int timeoutMs = (override != null && override.getTimeoutMs() != null && override.getTimeoutMs() > 0)
+            ? override.getTimeoutMs().intValue()
+            : properties.getPaddleocr().getTimeoutMs();
+        Map<String, Object> opts = override != null ? override.getExtraOptions() : null;
+        double minConf = readDouble(opts, "confidenceThreshold",
+            properties.getPaddleocr().getConfidenceThreshold());
 
         // 1) 图片读成 base64
         String base64;
@@ -86,10 +86,9 @@ public class PaddleOcrProvider implements OcrProvider {
         Map<String, Object> body = new HashMap<>();
         body.put("file", base64);
         body.put("fileType", 1);
-        // 关闭无关的预处理流水（仅做检测+识别），减少 CPU 开销
-        body.put("useDocOrientationClassify", false);
-        body.put("useDocUnwarping", false);
-        body.put("useTextlineOrientation", false);
+        body.put("useDocOrientationClassify", readBool(opts, "useDocOrientationClassify", false));
+        body.put("useDocUnwarping", readBool(opts, "useDocUnwarping", false));
+        body.put("useTextlineOrientation", readBool(opts, "useTextlineOrientation", false));
 
         HttpHeaders headers = new HttpHeaders();
         headers.setContentType(MediaType.APPLICATION_JSON);
@@ -98,15 +97,12 @@ public class PaddleOcrProvider implements OcrProvider {
         // 3) 调用
         String json;
         try {
-            json = restTemplate().postForObject(properties.getPaddleocr().getUrl(), entity, String.class);
+            json = restTemplateFor(url, timeoutMs).postForObject(url, entity, String.class);
         } catch (Exception e) {
-            throw new RuntimeException("PaddleOCR 调用失败: url=" + properties.getPaddleocr().getUrl()
-                + ", err=" + e.getMessage(), e);
+            throw new RuntimeException("PaddleOCR 调用失败: url=" + url + ", err=" + e.getMessage(), e);
         }
 
         // 4) 解析响应
-        // {"logId":"...","errorCode":0,"errorMsg":"Success",
-        //  "result":{"ocrResults":[{"prunedResult":{"rec_texts":["..."],"rec_scores":[0.99]}}]}}
         StringBuilder sb = new StringBuilder();
         try {
             JSONObject root = JSON.parseObject(json);
@@ -120,7 +116,6 @@ public class PaddleOcrProvider implements OcrProvider {
             JSONArray ocrResults = result.getJSONArray("ocrResults");
             if (ocrResults == null || ocrResults.isEmpty()) return "";
 
-            double minConf = properties.getPaddleocr().getConfidenceThreshold();
             for (int i = 0; i < ocrResults.size(); i++) {
                 JSONObject pageResult = ocrResults.getJSONObject(i);
                 JSONObject pruned = pageResult.getJSONObject("prunedResult");
@@ -143,18 +138,34 @@ public class PaddleOcrProvider implements OcrProvider {
         }
 
         String text = sb.toString();
-        log.info("[PaddleOcrProvider] OCR 完成: {} 字符, {} ms",
-            text.length(), System.currentTimeMillis() - start);
+        log.info("[PaddleOcrProvider] OCR 完成: {} 字符, {} ms, url={}",
+            text.length(), System.currentTimeMillis() - start, url);
         return text;
     }
 
-    private RestTemplate restTemplate() {
-        if (restTemplate == null) {
+    private RestTemplate restTemplateFor(String url, int timeoutMs) {
+        String key = url + "@" + timeoutMs;
+        return restTemplateCache.computeIfAbsent(key, k -> {
             SimpleClientHttpRequestFactory factory = new SimpleClientHttpRequestFactory();
             factory.setConnectTimeout(Duration.ofSeconds(10));
-            factory.setReadTimeout(Duration.ofMillis(properties.getPaddleocr().getTimeoutMs()));
-            this.restTemplate = new RestTemplate(factory);
-        }
-        return restTemplate;
+            factory.setReadTimeout(Duration.ofMillis(timeoutMs));
+            return new RestTemplate(factory);
+        });
+    }
+
+    private double readDouble(Map<String, Object> m, String key, double dft) {
+        if (m == null) return dft;
+        Object v = m.get(key);
+        if (v == null) return dft;
+        if (v instanceof Number n) return n.doubleValue();
+        try { return Double.parseDouble(v.toString()); } catch (Exception e) { return dft; }
+    }
+
+    private boolean readBool(Map<String, Object> m, String key, boolean dft) {
+        if (m == null) return dft;
+        Object v = m.get(key);
+        if (v instanceof Boolean b) return b;
+        if (v instanceof String s) return Boolean.parseBoolean(s);
+        return dft;
     }
 }

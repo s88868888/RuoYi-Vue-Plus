@@ -6,26 +6,33 @@ import com.alibaba.cloud.ai.dashscope.chat.DashScopeChatOptions;
 import com.alibaba.cloud.ai.dashscope.chat.DashScopeChatModel;
 import lombok.extern.slf4j.Slf4j;
 import org.dromara.common.ai.config.OllamaProperties;
+import org.dromara.common.ai.dto.AiModelConfigDto;
 import org.springframework.ai.chat.client.ChatClient;
 import org.springframework.ai.chat.prompt.Prompt;
 import org.springframework.ai.embedding.EmbeddingModel;
 import org.springframework.ai.model.SimpleApiKey;
 import org.springframework.ai.ollama.OllamaChatModel;
+import org.springframework.ai.ollama.api.OllamaApi;
 import org.springframework.ai.ollama.api.OllamaChatOptions;
+import org.springframework.ai.ollama.management.ModelManagementOptions;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.core.io.Resource;
 import org.springframework.core.io.UrlResource;
+import org.springframework.http.client.SimpleClientHttpRequestFactory;
 import org.springframework.stereotype.Service;
 
 import org.springframework.util.MimeTypeUtils;
+import org.springframework.web.client.RestClient;
 
 import java.net.MalformedURLException;
 import java.net.URI;
+import java.time.Duration;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.function.Supplier;
 
 /**
@@ -707,4 +714,244 @@ public class AiChatService {
         return sb.toString();
     }
 
+    // ==================== 动态模型配置（review_model_config 驱动） ====================
+
+    private record OllamaCacheEntry(AiModelConfigDto snapshot, OllamaChatModel model) {}
+    private record DashScopeCacheEntry(AiModelConfigDto snapshot, DashScopeChatModel model) {}
+
+    /**
+     * 缓存：configId → (snapshot, model)。
+     * snapshot 用于检测 DB 改动，DTO 不一致则重建实例（无需重启）。
+     */
+    private final Map<Long, OllamaCacheEntry> ollamaModelCache = new ConcurrentHashMap<>();
+    private final Map<Long, DashScopeCacheEntry> dashScopeModelCache = new ConcurrentHashMap<>();
+
+    /**
+     * 按配置调用 AI（DB 驱动，编辑后立即生效，无需重启）。
+     * 与 chatLong/chatLongLocal 同契约（system + user 纯文本），但模型参数全部来自传入 DTO。
+     */
+    public String chatWithConfig(AiModelConfigDto config, String systemPrompt, String userMessage) {
+        if (config == null || config.getProvider() == null) {
+            throw new IllegalArgumentException("AI 模型配置不能为空且 provider 必填");
+        }
+        String sys = systemPrompt == null ? "" : systemPrompt;
+        String usr = userMessage == null ? "" : userMessage;
+        long start = System.currentTimeMillis();
+        String content = switch (config.getProvider().toLowerCase(Locale.ROOT)) {
+            case "ollama" -> chatViaOllama(config, sys, usr);
+            case "dashscope" -> chatViaDashScope(config, sys, usr);
+            default -> throw new IllegalArgumentException(
+                "暂不支持的 provider: " + config.getProvider() + "（仅支持 ollama / dashscope）");
+        };
+        log.info("[chatWithConfig] code={}, model={}, provider={}, 耗时={}ms, 返回长度={}",
+            config.getCode(), config.getModelName(), config.getProvider(),
+            System.currentTimeMillis() - start, content == null ? 0 : content.length());
+        return content;
+    }
+
+    // ==================== Ollama 路由（按 config 缓存实例） ====================
+
+    private String chatViaOllama(AiModelConfigDto cfg, String sys, String usr) {
+        OllamaChatModel model = getOrCreateOllamaModel(cfg);
+
+        var optBuilder = OllamaChatOptions.builder()
+            .model(cfg.getModelName())
+            .temperature(cfg.getTemperature() == null ? 0.2 : cfg.getTemperature().doubleValue())
+            .topP(cfg.getTopP() == null ? 0.8 : cfg.getTopP().doubleValue());
+        if (cfg.getNumCtx() != null) optBuilder.numCtx(cfg.getNumCtx());
+        if (cfg.getNumPredict() != null) optBuilder.numPredict(cfg.getNumPredict());
+
+        // 通过 extraOptions 控制 format / think 等运行时行为
+        Map<String, Object> opts = cfg.getExtraOptions();
+        if (opts != null) {
+            Object fmt = opts.get("format");
+            if (fmt instanceof String s && !s.isBlank()) optBuilder.format(s);
+            Object think = opts.get("think");
+            if (Boolean.FALSE.equals(think)) optBuilder.disableThinking();
+        }
+
+        ChatClient client = ChatClient.builder(model).build();
+        // 双保险：think:false 在部分 ollama 版本 .disableThinking() 不生效，user 末尾追加 /no_think
+        boolean noThink = opts != null && Boolean.FALSE.equals(opts.get("think"));
+        String userContent = (noThink && !usr.endsWith("/no_think")) ? usr + "\n/no_think" : usr;
+
+        return client.prompt()
+            .system(sys)
+            .user(userContent)
+            .options(optBuilder.build())
+            .call()
+            .content();
+    }
+
+    private OllamaChatModel getOrCreateOllamaModel(AiModelConfigDto cfg) {
+        OllamaCacheEntry cached = ollamaModelCache.get(cfg.getId());
+        if (cached != null && isOllamaInstanceCompatible(cached.snapshot(), cfg)) {
+            return cached.model();
+        }
+        synchronized (ollamaModelCache) {
+            cached = ollamaModelCache.get(cfg.getId());
+            if (cached != null && isOllamaInstanceCompatible(cached.snapshot(), cfg)) {
+                return cached.model();
+            }
+            OllamaChatModel built = buildOllamaModel(cfg);
+            ollamaModelCache.put(cfg.getId(), new OllamaCacheEntry(cfg, built));
+            log.info("[AiChatService] 构建 Ollama 实例 id={}, code={}, baseUrl={}, model={}",
+                cfg.getId(), cfg.getCode(), cfg.getBaseUrl(), cfg.getModelName());
+            return built;
+        }
+    }
+
+    /** 实例级参数（baseUrl/timeout）一致才能复用缓存；模型名 + numCtx 等 per-request 选项不进入判定 */
+    private boolean isOllamaInstanceCompatible(AiModelConfigDto a, AiModelConfigDto b) {
+        return java.util.Objects.equals(a.getBaseUrl(), b.getBaseUrl())
+            && java.util.Objects.equals(a.getTimeoutMs(), b.getTimeoutMs());
+    }
+
+    private OllamaChatModel buildOllamaModel(AiModelConfigDto cfg) {
+        if (cfg.getBaseUrl() == null || cfg.getBaseUrl().isBlank()) {
+            throw new IllegalArgumentException("Ollama 配置缺少 baseUrl: " + cfg.getCode());
+        }
+        long readTimeout = cfg.getTimeoutMs() == null ? 300000L : cfg.getTimeoutMs();
+        SimpleClientHttpRequestFactory rf = new SimpleClientHttpRequestFactory();
+        rf.setConnectTimeout(Duration.ofSeconds(30));
+        rf.setReadTimeout(Duration.ofMillis(readTimeout));
+        RestClient.Builder rcb = RestClient.builder().requestFactory(rf);
+        OllamaApi api = OllamaApi.builder()
+            .baseUrl(cfg.getBaseUrl())
+            .restClientBuilder(rcb)
+            .build();
+        return OllamaChatModel.builder()
+            .ollamaApi(api)
+            .modelManagementOptions(ModelManagementOptions.defaults())
+            .build();
+    }
+
+    // ==================== DashScope 路由（按 config 缓存实例） ====================
+
+    private String chatViaDashScope(AiModelConfigDto cfg, String sys, String usr) {
+        DashScopeChatModel model = getOrCreateDashScopeModel(cfg);
+        var optBuilder = DashScopeChatOptions.builder()
+            .withModel(cfg.getModelName())
+            .withTemperature(cfg.getTemperature() == null ? 0.3 : cfg.getTemperature().doubleValue())
+            .withTopP(cfg.getTopP() == null ? 0.8 : cfg.getTopP().doubleValue());
+        if (cfg.getMaxTokens() != null) optBuilder.withMaxToken(cfg.getMaxTokens());
+        Map<String, Object> opts = cfg.getExtraOptions();
+        if (opts != null) {
+            Object inc = opts.get("incrementalOutput");
+            if (Boolean.TRUE.equals(inc)) optBuilder.withIncrementalOutput(true);
+            Object multi = opts.get("multiModel");
+            if (Boolean.TRUE.equals(multi)) optBuilder.withMultiModel(true);
+        }
+        ChatClient client = ChatClient.builder(model).build();
+        try {
+            return callWithRetry(() -> client.prompt()
+                .system(sys)
+                .user(usr)
+                .options(optBuilder.build())
+                .call()
+                .content());
+        } catch (Exception e) {
+            String msg = e.getMessage() == null ? "" : e.getMessage();
+            // DashScope 模型名/端点不匹配时返回 "url error"，原始报错并不友好；
+            // 不做启发式判断（模型种类太多，猜测反而误导），直接把关键上下文打出来让用户自己判断
+            if (msg.contains("url error") || msg.contains("InvalidParameter")) {
+                boolean multiModel = opts != null && Boolean.TRUE.equals(opts.get("multiModel"));
+                throw new RuntimeException(String.format(
+                    "DashScope 调用失败 [code=%s, model=%s, multiModel=%s]。"
+                        + "通常是模型名与接口类型不匹配：多模态模型(如 qwen-vl-plus / qwen3-vl-plus / qwen3.6-plus)需开启 multiModel；"
+                        + "纯文本模型(qwen-plus / qwen-long / qwen-max)需关闭 multiModel。"
+                        + "请去「AI模型配置」检查。原始错误: %s",
+                    cfg.getCode(), cfg.getModelName(), multiModel, msg), e);
+            }
+            throw e;
+        }
+    }
+
+    private DashScopeChatModel getOrCreateDashScopeModel(AiModelConfigDto cfg) {
+        DashScopeCacheEntry cached = dashScopeModelCache.get(cfg.getId());
+        if (cached != null && isDashScopeInstanceCompatible(cached.snapshot(), cfg)) {
+            return cached.model();
+        }
+        synchronized (dashScopeModelCache) {
+            cached = dashScopeModelCache.get(cfg.getId());
+            if (cached != null && isDashScopeInstanceCompatible(cached.snapshot(), cfg)) {
+                return cached.model();
+            }
+            DashScopeChatModel built = buildDashScopeModel(cfg);
+            dashScopeModelCache.put(cfg.getId(), new DashScopeCacheEntry(cfg, built));
+            log.info("[AiChatService] 构建 DashScope 实例 id={}, code={}, model={}",
+                cfg.getId(), cfg.getCode(), cfg.getModelName());
+            return built;
+        }
+    }
+
+    private boolean isDashScopeInstanceCompatible(AiModelConfigDto a, AiModelConfigDto b) {
+        return java.util.Objects.equals(a.getBaseUrl(), b.getBaseUrl())
+            && java.util.Objects.equals(resolveApiKey(a.getApiKey()), resolveApiKey(b.getApiKey()))
+            && java.util.Objects.equals(a.getTimeoutMs(), b.getTimeoutMs())
+            // multiModel 决定 completionsPath，必须参与缓存键
+            && readMultiModel(a) == readMultiModel(b);
+    }
+
+    private boolean readMultiModel(AiModelConfigDto cfg) {
+        return cfg.getExtraOptions() != null
+            && Boolean.TRUE.equals(cfg.getExtraOptions().get("multiModel"));
+    }
+
+    private DashScopeChatModel buildDashScopeModel(AiModelConfigDto cfg) {
+        String apiKey = resolveApiKey(cfg.getApiKey());
+        if (apiKey == null || apiKey.isBlank()) {
+            apiKey = this.dashScopeApiKey;  // 回退到全局 key
+        }
+        if (apiKey == null || apiKey.isBlank()) {
+            throw new IllegalArgumentException("DashScope 配置缺少 apiKey: " + cfg.getCode());
+        }
+        // 关键：注入 timeoutMs 到 RestClient，否则 Jetty 默认 10s 超时，多模态/长文档必然失败
+        long readTimeout = cfg.getTimeoutMs() == null || cfg.getTimeoutMs() <= 0 ? 120000L : cfg.getTimeoutMs();
+        SimpleClientHttpRequestFactory rf = new SimpleClientHttpRequestFactory();
+        rf.setConnectTimeout(Duration.ofSeconds(30));
+        rf.setReadTimeout(Duration.ofMillis(readTimeout));
+        RestClient.Builder rcb = RestClient.builder().requestFactory(rf);
+        // 多模态走 multimodal-generation 端点，纯文本走默认
+        boolean multiModel = cfg.getExtraOptions() != null
+            && Boolean.TRUE.equals(cfg.getExtraOptions().get("multiModel"));
+        DashScopeApi.Builder builder = DashScopeApi.builder()
+            .apiKey(apiKey)
+            .restClientBuilder(rcb);
+        if (multiModel) {
+            builder.completionsPath("/api/v1/services/aigc/multimodal-generation/generation");
+        }
+        if (cfg.getBaseUrl() != null && !cfg.getBaseUrl().isBlank()) {
+            builder.baseUrl(cfg.getBaseUrl());
+        }
+        return DashScopeChatModel.builder()
+            .dashScopeApi(builder.build())
+            .build();
+    }
+
+    /** apiKey 支持 ${ENV_VAR} 占位符，未设置则返回原值 */
+    private String resolveApiKey(String raw) {
+        if (raw == null) return null;
+        if (raw.startsWith("${") && raw.endsWith("}")) {
+            String envName = raw.substring(2, raw.length() - 1);
+            String fromEnv = System.getenv(envName);
+            return (fromEnv != null && !fromEnv.isBlank()) ? fromEnv : null;
+        }
+        return raw;
+    }
+
+    /**
+     * 配置变更时清除缓存（CRUD 后调用）
+     */
+    public void evictModelCache(Long configId) {
+        if (configId == null) {
+            ollamaModelCache.clear();
+            dashScopeModelCache.clear();
+            log.info("[AiChatService] 已清空全部 ChatModel 缓存");
+        } else {
+            ollamaModelCache.remove(configId);
+            dashScopeModelCache.remove(configId);
+            log.info("[AiChatService] 清除 ChatModel 缓存 id={}", configId);
+        }
+    }
 }

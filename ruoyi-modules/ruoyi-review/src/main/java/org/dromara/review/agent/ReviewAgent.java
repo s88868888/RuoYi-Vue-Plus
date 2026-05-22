@@ -7,6 +7,7 @@ import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
 import com.baomidou.mybatisplus.core.toolkit.Wrappers;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.dromara.common.ai.dto.AiModelConfigDto;
 import org.dromara.common.ai.ocr.OcrProviderFactory;
 import org.dromara.common.ai.service.AiChatService;
 import org.dromara.common.ai.util.PdfTextExtractor;
@@ -15,6 +16,7 @@ import org.dromara.common.oss.factory.OssFactory;
 import org.dromara.common.tenant.helper.TenantHelper;
 import org.dromara.review.domain.*;
 import org.dromara.review.mapper.*;
+import org.dromara.review.service.IReviewModelConfigService;
 import org.dromara.review.service.ReviewRagService;
 import org.dromara.system.domain.vo.SysOssVo;
 import org.dromara.system.service.ISysOssService;
@@ -63,6 +65,7 @@ public class ReviewAgent {
     private final ReviewStandardKnowledgeMapper standardKnowledgeMapper;
     private final ReviewKnowledgePatternMapper knowledgePatternMapper;
     private final ReviewKnowledgeMapper knowledgeMapper;
+    private final IReviewModelConfigService modelConfigService;
 
     /** 回调签名共享密钥，外部系统验签必须用相同值 */
     @Value("${review.webhook.secret:}")
@@ -73,6 +76,13 @@ public class ReviewAgent {
     /** 失败重试次数（指数退避：2s/5s/10s） */
     @Value("${review.webhook.max-retries:3}")
     private int webhookMaxRetries;
+    /**
+     * 外部系统传入的 filePath 是相对路径时拼接的 base URL（绝对 http(s):// URL 不动）。
+     * 例：base=http://192.168.169.47:9004/，外部传 "upload/abc.pdf" → 拼成 http://192.168.169.47:9004/upload/abc.pdf
+     * 留空则相对路径下载会直接报错，强制外部系统传完整 URL。
+     */
+    @Value("${review.external.file-base-url:}")
+    private String externalFileBaseUrl;
 
     @Transactional(rollbackFor = Exception.class)
     public void execute(Long taskId) {
@@ -100,6 +110,9 @@ public class ReviewAgent {
 
             // 3. 加载提示词模板（按任务类型匹配，找不到则用 general）
             ReviewPromptTemplate template = loadPromptTemplate(task.getTaskType());
+
+            // 3.1 解析模板关联的模型配置（DB驱动，热切换）；为空则走 legacy model_name 路径
+            AiModelConfigDto modelConfig = resolveModelConfig(template);
 
             // 4. 构建知识上下文（RAG 检索案例 + 模式 + 误判）
             String queryText = task.getFormSnapshot() != null ? task.getFormSnapshot() : task.getTaskName();
@@ -137,7 +150,7 @@ public class ReviewAgent {
                 .replace("{output_format}", outputFormat);
 
             // 6. 根据附件类型选择 AI 调用方式
-            String aiResponse = callAi(files, systemPrompt, userPrompt, template);
+            String aiResponse = callAi(files, systemPrompt, userPrompt, template, modelConfig);
 
             log.info("[ReviewAgent] AI返回结果长度: {}", aiResponse.length());
 
@@ -146,7 +159,7 @@ public class ReviewAgent {
             saveResultItems(task, result, allRules);
 
             long duration = System.currentTimeMillis() - startTime;
-            String modelUsed = determineModel(files, template);
+            String modelUsed = determineModel(files, template, modelConfig);
             updateTaskStatus(task, result, duration, allRules, modelUsed, aiResponse);
 
             // 8. 写入知识库案例（审核完成后自动沉淀）
@@ -185,15 +198,18 @@ public class ReviewAgent {
      * - 留空 / 任意 dashscope 模型名 → 走云端 qwen-long（chatLong）
      * - 以 {@code ollama:} 为前缀（如 {@code ollama:qwen3.6:35b-a3b-q4_K_M}） → 走本地 Ollama（chatLongLocal）
      */
-    private String callAi(List<ReviewTaskFile> files, String systemPrompt, String userPrompt, ReviewPromptTemplate template) {
+    private String callAi(List<ReviewTaskFile> files, String systemPrompt, String userPrompt,
+                          ReviewPromptTemplate template, AiModelConfigDto modelConfig) {
         List<ReviewTaskFile> imageFiles = files.stream()
             .filter(f -> isImageFile(f.getFileType())).toList();
         List<ReviewTaskFile> docFiles = files.stream()
             .filter(f -> isDocumentFile(f.getFileType())).toList();
 
         if (!imageFiles.isEmpty()) {
+            // 视觉路径：qwen-vl 配置走 chatWithImage（多模态需要 image+text 复合输入，
+            // 不能简单走 chatWithConfig 文本通道；DB 配置当前仅作为模型ID载体）
             ReviewTaskFile imageFile = imageFiles.get(0);
-            log.info("[ReviewAgent] 检测到 {} 张图片附件，使用视觉模型 (qwen3-vl-plus), 首张 ossId={}",
+            log.info("[ReviewAgent] 检测到 {} 张图片附件，使用视觉模型, 首张 ossId={}",
                 imageFiles.size(), imageFile.getOssId());
             try {
                 Resource resource = downloadFileAsResource(imageFile);
@@ -205,12 +221,13 @@ public class ReviewAgent {
         }
 
         if (!docFiles.isEmpty()) {
-            log.info("[ReviewAgent] 检测到 {} 份文档附件，开始文本层探测 + OCR 预处理", docFiles.size());
+            log.info("[ReviewAgent] 检测到 {} 份文档附件，开始文本层探测 + OCR 预处理 (ocrConfigId={})",
+                docFiles.size(), template.getOcrConfigId());
             try {
                 StringBuilder docsBlock = new StringBuilder();
                 for (int i = 0; i < docFiles.size(); i++) {
                     ReviewTaskFile f = docFiles.get(i);
-                    String docText = extractOrOcrPdf(f);
+                    String docText = extractOrOcrPdf(f, template.getOcrConfigId());
                     docsBlock.append("【文件").append(i + 1).append("：")
                         .append(f.getFileName() == null ? "未命名" : f.getFileName()).append("】\n")
                         .append(docText).append("\n\n");
@@ -218,10 +235,23 @@ public class ReviewAgent {
                 String enrichedUser = docsBlock + "\n=== 审核任务指令 ===\n" + userPrompt;
                 log.info("[ReviewAgent] 文档预处理完成，文本总长度={}", enrichedUser.length());
 
+                // 优先走 DB 配置（热切换，运营可在线编辑）
+                if (modelConfig != null) {
+                    String provider = modelConfig.getProvider() == null ? "" : modelConfig.getProvider().toLowerCase();
+                    if ("ollama".equals(provider) || "dashscope".equals(provider)) {
+                        log.info("[ReviewAgent] 路由到 model_config: id={}, code={}, provider={}, model={}",
+                            modelConfig.getId(), modelConfig.getCode(), provider, modelConfig.getModelName());
+                        return aiChatService.chatWithConfig(modelConfig, systemPrompt, enrichedUser);
+                    }
+                    log.warn("[ReviewAgent] model_config provider={} 不支持文档场景，回退到 legacy 路径",
+                        modelConfig.getProvider());
+                }
+
+                // Legacy 兜底：按 modelName 前缀路由
                 String modelName = template.getModelName();
                 if (modelName != null && modelName.startsWith("ollama:")) {
                     String localModel = modelName.substring("ollama:".length());
-                    log.info("[ReviewAgent] 路由到本地 Ollama: {}", localModel);
+                    log.info("[ReviewAgent] [legacy] 路由到本地 Ollama: {}", localModel);
                     return aiChatService.chatLongLocal(systemPrompt, enrichedUser, localModel);
                 }
                 return aiChatService.chatLong(systemPrompt, enrichedUser);
@@ -231,6 +261,15 @@ public class ReviewAgent {
             }
         }
 
+        // 纯文本场景：DB 配置优先（dashscope 文本走 chatWithConfig，ollama 同样支持）
+        if (modelConfig != null) {
+            String provider = modelConfig.getProvider() == null ? "" : modelConfig.getProvider().toLowerCase();
+            if ("ollama".equals(provider) || "dashscope".equals(provider)) {
+                log.info("[ReviewAgent] 无附件，按 model_config 调用: code={}, model={}",
+                    modelConfig.getCode(), modelConfig.getModelName());
+                return aiChatService.chatWithConfig(modelConfig, systemPrompt, userPrompt);
+            }
+        }
         log.info("[ReviewAgent] 无附件，使用文本模型 (qwen-plus)");
         return aiChatService.chat(systemPrompt, userPrompt);
     }
@@ -242,7 +281,7 @@ public class ReviewAgent {
      * <p>
      * 非 PDF 文档（docx/xlsx 等）目前直接 OCR fallback 走不到，会在调用方报"不支持的文档类型"。
      */
-    private String extractOrOcrPdf(ReviewTaskFile taskFile) throws Exception {
+    private String extractOrOcrPdf(ReviewTaskFile taskFile, Long ocrConfigId) throws Exception {
         Resource resource = downloadFileAsResource(taskFile);
         if (!(resource instanceof FileSystemResource)) {
             throw new RuntimeException("文档预处理仅支持本地文件资源，实际类型: " + resource.getClass().getName());
@@ -259,8 +298,8 @@ public class ReviewAgent {
             return text;
         }
 
-        log.info("[ReviewAgent] {} 为扫描件，逐页OCR开始 (provider={})",
-            taskFile.getFileName(), ocrProviderFactory.get().getName());
+        log.info("[ReviewAgent] {} 为扫描件，逐页OCR开始 (provider={}, ocrConfigId={})",
+            taskFile.getFileName(), ocrProviderFactory.currentProviderName(ocrConfigId), ocrConfigId);
         List<byte[]> pages = PdfTextExtractor.renderPagesToPng(pdfFile);
         StringBuilder sb = new StringBuilder();
         for (int p = 0; p < pages.size(); p++) {
@@ -270,7 +309,7 @@ public class ReviewAgent {
                 @Override
                 public String getFilename() { return "page-" + pageNo + ".png"; }
             };
-            String pageText = ocrProviderFactory.get().ocr(pageRes);
+            String pageText = ocrProviderFactory.ocrWithConfig(pageRes, ocrConfigId);
             sb.append("--- 第").append(pageNo).append("页 ---\n").append(pageText).append("\n");
             log.info("[ReviewAgent] {} 第{}页OCR完成，识别 {} 字符",
                 taskFile.getFileName(), pageNo, pageText == null ? 0 : pageText.length());
@@ -295,8 +334,16 @@ public class ReviewAgent {
         if (taskFile.getFilePath() != null && !taskFile.getFilePath().isBlank()) {
             String fileUrl = taskFile.getFilePath();
             try {
-                if (!fileUrl.startsWith("http")) {
-                    fileUrl = "http://192.168.169.47:9004/" + fileUrl;
+                if (!fileUrl.startsWith("http://") && !fileUrl.startsWith("https://")) {
+                    if (externalFileBaseUrl == null || externalFileBaseUrl.isBlank()) {
+                        throw new RuntimeException(
+                            "filePath 是相对路径但未配置 review.external.file-base-url：" + fileUrl);
+                    }
+                    String base = externalFileBaseUrl.endsWith("/")
+                        ? externalFileBaseUrl
+                        : externalFileBaseUrl + "/";
+                    String rel = fileUrl.startsWith("/") ? fileUrl.substring(1) : fileUrl;
+                    fileUrl = base + rel;
                 }
                 // 中文路径要做 percent-encoding，否则 URL.openStream 会 400
                 String encodedUrl = encodeUrlPathSegments(fileUrl);
@@ -359,12 +406,23 @@ public class ReviewAgent {
         }
     }
 
-    private String determineModel(List<ReviewTaskFile> files, ReviewPromptTemplate template) {
+    private String determineModel(List<ReviewTaskFile> files, ReviewPromptTemplate template, AiModelConfigDto modelConfig) {
         boolean hasImage = files.stream().anyMatch(f -> isImageFile(f.getFileType()));
-        if (hasImage) return "qwen3-vl-plus";
+        if (hasImage) {
+            // 视觉走 chatWithImage，模型固定 qwen3-vl-plus；如果模板的 modelConfig
+            // 显式指向了 qwen3-vl-plus，就用它的 modelName 落库便于追溯
+            if (modelConfig != null && modelConfig.getModelName() != null
+                && modelConfig.getModelName().contains("vl")) {
+                return modelConfig.getModelName();
+            }
+            return "qwen3-vl-plus";
+        }
+        // DB 配置优先：文档/纯文本场景下 chatWithConfig 使用的就是 modelConfig.modelName
+        if (modelConfig != null) {
+            return modelConfig.getModelName();
+        }
         boolean hasDoc = files.stream().anyMatch(f -> isDocumentFile(f.getFileType()));
         if (hasDoc) {
-            // 文档场景下 model_name 字段决定走云端还是本地
             String modelName = template.getModelName();
             if (modelName != null && modelName.startsWith("ollama:")) {
                 return modelName;
@@ -375,6 +433,22 @@ public class ReviewAgent {
             return template.getModelName();
         }
         return "qwen-plus";
+    }
+
+    /**
+     * 模板配置了 model_config_id → 取出 enabled DTO；为空或加载失败返回 null，让上层走 legacy 路径
+     */
+    private AiModelConfigDto resolveModelConfig(ReviewPromptTemplate template) {
+        if (template == null || template.getModelConfigId() == null) {
+            return null;
+        }
+        try {
+            return modelConfigService.getEnabledDto(template.getModelConfigId());
+        } catch (Exception e) {
+            log.warn("[ReviewAgent] 加载模型配置失败 templateId={}, modelConfigId={}, err={}，回退 legacy 路径",
+                template.getId(), template.getModelConfigId(), e.getMessage());
+            return null;
+        }
     }
 
     // ==================== 数据加载 ====================
@@ -1114,10 +1188,8 @@ public class ReviewAgent {
         }
         String callbackUrl = task.getCallbackUrl();
         if (callbackUrl == null || callbackUrl.isBlank()) {
-            callbackUrl = resolveCallbackUrl(task.getSourceType());
-        }
-        if (callbackUrl == null || callbackUrl.isBlank()) {
-            log.debug("[ReviewAgent] 任务 {} 无回调地址，跳过", task.getId());
+            log.debug("[ReviewAgent] 任务 {} 未传 callbackUrl，跳过外部回调（外部系统应在 createTask 时传入回调地址）",
+                task.getId());
             return;
         }
 
@@ -1217,15 +1289,5 @@ public class ReviewAgent {
         } catch (Exception e) {
             throw new RuntimeException("签名失败", e);
         }
-    }
-
-    /**
-     * 兜底回调地址（调用方未传 callbackUrl 时按 sourceType 路由）
-     */
-    private String resolveCallbackUrl(String sourceType) {
-        return switch (sourceType) {
-            case "company" -> "http://127.0.0.1:8000/api/v1/admin/company/review-callback";
-            default -> null;
-        };
     }
 }

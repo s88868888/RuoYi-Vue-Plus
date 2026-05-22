@@ -91,6 +91,12 @@ public class ReviewTaskBo extends BaseEntity {
      */
     private String callbackUrl;
 
+    /**
+     * 是否在创建后立即异步执行审核（外部系统接入推荐 true，省一次 RPC）
+     * 默认 false 保持向后兼容
+     */
+    private Boolean autoExecute;
+
     @Data
     public static class TaskFileBo {
         private Long ossId;
