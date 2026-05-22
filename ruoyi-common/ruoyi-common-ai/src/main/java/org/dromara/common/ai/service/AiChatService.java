@@ -834,13 +834,26 @@ public class AiChatService {
             .withModel(cfg.getModelName())
             .withTemperature(cfg.getTemperature() == null ? 0.3 : cfg.getTemperature().doubleValue())
             .withTopP(cfg.getTopP() == null ? 0.8 : cfg.getTopP().doubleValue());
-        if (cfg.getMaxTokens() != null) optBuilder.withMaxToken(cfg.getMaxTokens());
+        if (cfg.getMaxTokens() != null) {
+            optBuilder.withMaxToken(cfg.getMaxTokens());
+        }
         Map<String, Object> opts = cfg.getExtraOptions();
         if (opts != null) {
             Object inc = opts.get("incrementalOutput");
-            if (Boolean.TRUE.equals(inc)) optBuilder.withIncrementalOutput(true);
+            if (Boolean.TRUE.equals(inc)) {
+                optBuilder.withIncrementalOutput(true);
+            }
             Object multi = opts.get("multiModel");
-            if (Boolean.TRUE.equals(multi)) optBuilder.withMultiModel(true);
+            if (Boolean.TRUE.equals(multi)) {
+                optBuilder.withMultiModel(true);
+            }
+            // Prompt Cache：审核场景 system+rules+knowledge 占 60%+，重复任务能命中缓存大幅降低延迟和成本。
+            // SDK 1.1.0.0 没暴露 enable_cache 字段，通过 X-DashScope-Cache header 触达后端。
+            // 文档：https://help.aliyun.com/zh/model-studio/context-cache
+            Object cache = opts.get("enableCache");
+            if (Boolean.TRUE.equals(cache)) {
+                optBuilder.withHttpHeaders(java.util.Map.of("X-DashScope-Cache", "enable"));
+            }
         }
         ChatClient client = ChatClient.builder(model).build();
         try {
@@ -890,12 +903,19 @@ public class AiChatService {
             && java.util.Objects.equals(resolveApiKey(a.getApiKey()), resolveApiKey(b.getApiKey()))
             && java.util.Objects.equals(a.getTimeoutMs(), b.getTimeoutMs())
             // multiModel 决定 completionsPath，必须参与缓存键
-            && readMultiModel(a) == readMultiModel(b);
+            && readMultiModel(a) == readMultiModel(b)
+            // enableCache 不影响实例本身（只影响请求 header），但留个判定位以便将来切到 body 字段时可控
+            && readEnableCache(a) == readEnableCache(b);
     }
 
     private boolean readMultiModel(AiModelConfigDto cfg) {
         return cfg.getExtraOptions() != null
             && Boolean.TRUE.equals(cfg.getExtraOptions().get("multiModel"));
+    }
+
+    private boolean readEnableCache(AiModelConfigDto cfg) {
+        return cfg.getExtraOptions() != null
+            && Boolean.TRUE.equals(cfg.getExtraOptions().get("enableCache"));
     }
 
     private DashScopeChatModel buildDashScopeModel(AiModelConfigDto cfg) {
