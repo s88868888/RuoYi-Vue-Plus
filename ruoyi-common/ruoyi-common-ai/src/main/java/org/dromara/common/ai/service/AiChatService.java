@@ -749,6 +749,71 @@ public class AiChatService {
         return content;
     }
 
+    /**
+     * 按配置 + 多张图片做视觉对话（DB 驱动）。
+     * 走 DashScope 多模态通道（必须 multiModel=true 的配置），单次同时喂 N 张图片 + system + user。
+     * <p>
+     * 注意：
+     * - 仅支持 provider=dashscope 且 extraOptions.multiModel=true 的配置
+     * - DashScope 多图单次请求建议 ≤ 10 张；超过自行分批由调用方决定
+     * - imageResources 任意一张为 null 都会被跳过
+     */
+    public String chatImagesWithConfig(AiModelConfigDto config, String systemPrompt,
+                                       List<Resource> imageResources, String userMessage) {
+        if (config == null || config.getProvider() == null) {
+            throw new IllegalArgumentException("AI 模型配置不能为空且 provider 必填");
+        }
+        if (!"dashscope".equalsIgnoreCase(config.getProvider())) {
+            throw new IllegalArgumentException(
+                "图片审核仅支持 provider=dashscope（当前=" + config.getProvider() + "）");
+        }
+        if (!readMultiModel(config)) {
+            throw new IllegalArgumentException(
+                "图片审核要求开启 multiModel；请在 AI模型配置 中打开「多模态接口」开关");
+        }
+        if (imageResources == null || imageResources.isEmpty()) {
+            throw new IllegalArgumentException("图片列表为空");
+        }
+
+        long start = System.currentTimeMillis();
+        DashScopeChatModel model = getOrCreateDashScopeModel(config);
+        var optBuilder = DashScopeChatOptions.builder()
+            .withModel(config.getModelName())
+            .withMultiModel(true)
+            .withTemperature(config.getTemperature() == null ? 0.1 : config.getTemperature().doubleValue())
+            .withTopP(config.getTopP() == null ? 0.8 : config.getTopP().doubleValue());
+        if (config.getMaxTokens() != null) optBuilder.withMaxToken(config.getMaxTokens());
+        if (readEnableCache(config)) {
+            optBuilder.withHttpHeaders(java.util.Map.of("X-DashScope-Cache", "enable"));
+        }
+
+        String sys = systemPrompt == null ? "" : systemPrompt;
+        String usr = userMessage == null ? "" : userMessage;
+        ChatClient client = ChatClient.builder(model).build();
+
+        // 用 callWithRetry 复用已有重试逻辑
+        String content = callWithRetry(() -> client.prompt()
+            .system(sys)
+            .user(u -> {
+                u.text(usr);
+                int idx = 0;
+                for (Resource res : imageResources) {
+                    if (res == null) continue;
+                    u.media(MimeTypeUtils.IMAGE_PNG, res);
+                    idx++;
+                }
+                log.debug("[chatImagesWithConfig] 已附加 {} 张图片", idx);
+            })
+            .options(optBuilder.build())
+            .call()
+            .content());
+
+        log.info("[chatImagesWithConfig] code={}, model={}, 图片数={}, 耗时={}ms, 返回长度={}",
+            config.getCode(), config.getModelName(), imageResources.size(),
+            System.currentTimeMillis() - start, content == null ? 0 : content.length());
+        return content;
+    }
+
     // ==================== Ollama 路由（按 config 缓存实例） ====================
 
     private String chatViaOllama(AiModelConfigDto cfg, String sys, String usr) {

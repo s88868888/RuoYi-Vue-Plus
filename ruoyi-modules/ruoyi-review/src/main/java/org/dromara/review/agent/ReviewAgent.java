@@ -244,16 +244,40 @@ public class ReviewAgent {
             .filter(f -> isDocumentFile(f.getFileType())).toList();
 
         if (!imageFiles.isEmpty()) {
-            // 视觉路径：qwen-vl 配置走 chatWithImage（多模态需要 image+text 复合输入，
-            // 不能简单走 chatWithConfig 文本通道；DB 配置当前仅作为模型ID载体）
-            ReviewTaskFile imageFile = imageFiles.get(0);
-            log.info("[ReviewAgent] 检测到 {} 张图片附件，使用视觉模型, 首张 ossId={}",
-                imageFiles.size(), imageFile.getOssId());
+            log.info("[ReviewAgent] 检测到 {} 张图片附件，进入视觉审核分支", imageFiles.size());
             try {
-                Resource resource = downloadFileAsResource(imageFile);
-                return aiChatService.chatWithImage(systemPrompt, resource, userPrompt);
+                // 并发下载所有图片资源（IO 重叠）
+                ExecutorService pool = getOcrExecutor();
+                List<CompletableFuture<Resource>> dlFutures = new ArrayList<>(imageFiles.size());
+                for (ReviewTaskFile f : imageFiles) {
+                    dlFutures.add(CompletableFuture.supplyAsync(() -> {
+                        try { return downloadFileAsResource(f); }
+                        catch (Exception e) { throw new RuntimeException("下载图片失败: " + f.getFileName(), e); }
+                    }, pool));
+                }
+                List<Resource> resources = new ArrayList<>(imageFiles.size());
+                for (CompletableFuture<Resource> ft : dlFutures) {
+                    resources.add(ft.join());
+                }
+
+                // 优先走 model_config（支持任意多模态模型 + 在线热切换）
+                if (modelConfig != null
+                    && "dashscope".equalsIgnoreCase(modelConfig.getProvider())
+                    && modelConfig.getExtraOptions() != null
+                    && Boolean.TRUE.equals(modelConfig.getExtraOptions().get("multiModel"))) {
+                    log.info("[ReviewAgent] 视觉路由 → model_config: id={}, code={}, model={}, 图片数={}",
+                        modelConfig.getId(), modelConfig.getCode(), modelConfig.getModelName(), resources.size());
+                    return aiChatService.chatImagesWithConfig(modelConfig, systemPrompt, resources, userPrompt);
+                }
+
+                // legacy 兜底：走老的 multiModalChatClient（固定 qwen3-vl-plus，单图）
+                if (resources.size() > 1) {
+                    log.warn("[ReviewAgent] 模板未配置 multiModel 模型配置，回退 legacy 单图链路，{} 张图片只会用第一张",
+                        resources.size());
+                }
+                return aiChatService.chatWithImage(systemPrompt, resources.get(0), userPrompt);
             } catch (Exception e) {
-                log.error("[ReviewAgent] 图片文件下载或分析失败: {}", e.getMessage(), e);
+                log.error("[ReviewAgent] 图片审核失败: {}", e.getMessage(), e);
                 throw new RuntimeException("图片审核失败: " + e.getMessage(), e);
             }
         }
