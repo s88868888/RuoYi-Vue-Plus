@@ -27,7 +27,13 @@ import org.springframework.stereotype.Component;
 import org.springframework.transaction.annotation.Transactional;
 import org.springframework.beans.factory.annotation.Value;
 
+import org.apache.poi.xwpf.usermodel.XWPFDocument;
+import org.apache.poi.xwpf.extractor.XWPFWordExtractor;
+import org.apache.poi.hwpf.HWPFDocument;
+import org.apache.poi.hwpf.extractor.WordExtractor;
+
 import java.io.File;
+import java.io.FileInputStream;
 import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.HashSet;
@@ -365,8 +371,15 @@ public class ReviewAgent {
         }
         File pdfFile = ((FileSystemResource) resource).getFile();
         String ext = taskFile.getFileType() == null ? "" : taskFile.getFileType().toLowerCase();
+        // Word 类合同（系统打印产物或人工上传）：用 POI 直接抽文本，不走 OCR，PDF 链路保持原状
+        if ("docx".equals(ext) || "doc".equals(ext)) {
+            String text = extractWordText(pdfFile, ext);
+            log.info("[ReviewAgent] {} 为 {} 文档，POI 抽出 {} 字符",
+                taskFile.getFileName(), ext, text.length());
+            return text;
+        }
         if (!"pdf".equals(ext)) {
-            throw new RuntimeException("当前文档审核仅支持 PDF 格式（含打印件和扫描件），收到: " + ext);
+            throw new RuntimeException("当前文档审核仅支持 PDF / Word（doc, docx），收到: " + ext);
         }
 
         if (PdfTextExtractor.hasTextLayer(pdfFile)) {
@@ -408,6 +421,29 @@ public class ReviewAgent {
         log.info("[ReviewAgent] {} OCR 全部完成, 共 {} 页, 总耗时={}ms",
             taskFile.getFileName(), pages.size(), System.currentTimeMillis() - ocrStart);
         return sb.toString();
+    }
+
+    /**
+     * Word 文档纯文本抽取：docx 走 POI XWPF，doc 走 HWPF。
+     * 物管侧 GetPrintPath 产出的合同 docx 是模板系统直接生成的纯文本+表格结构，
+     * POI 抽出的文本就足以喂给大模型对比，无需再走 LibreOffice 转 PDF。
+     */
+    private String extractWordText(File wordFile, String ext) throws Exception {
+        if ("docx".equals(ext)) {
+            try (FileInputStream fis = new FileInputStream(wordFile);
+                 XWPFDocument doc = new XWPFDocument(fis);
+                 XWPFWordExtractor extractor = new XWPFWordExtractor(doc)) {
+                String text = extractor.getText();
+                return text == null ? "" : text;
+            }
+        }
+        // doc (老版本 Word 二进制格式)
+        try (FileInputStream fis = new FileInputStream(wordFile);
+             HWPFDocument doc = new HWPFDocument(fis);
+             WordExtractor extractor = new WordExtractor(doc)) {
+            String text = extractor.getText();
+            return text == null ? "" : text;
+        }
     }
 
     private Resource downloadFileAsResource(ReviewTaskFile taskFile) {

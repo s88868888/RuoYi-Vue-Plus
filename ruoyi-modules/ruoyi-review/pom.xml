@@ -88,6 +88,18 @@
             <version>2.0.61</version>
         </dependency>
 
+        <!-- Apache POI: docx/doc 文本提取（Word 类合同） -->
+        <dependency>
+            <groupId>org.apache.poi</groupId>
+            <artifactId>poi-ooxml</artifactId>
+            <version>5.2.5</version>
+        </dependency>
+        <dependency>
+            <groupId>org.apache.poi</groupId>
+            <artifactId>poi-scratchpad</artifactId>
+            <version>5.2.5</version>
+        </dependency>
+
     </dependencies>
 
 </project>
