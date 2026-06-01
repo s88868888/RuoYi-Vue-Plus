@@ -1,6 +1,7 @@
 package org.dromara.common.ai.ocr;
 
 import org.dromara.common.ai.dto.AiModelConfigDto;
+import org.dromara.common.ai.ocr.dto.OcrPageResult;
 import org.springframework.core.io.Resource;
 
 /**
@@ -35,5 +36,19 @@ public interface OcrProvider {
      */
     default String ocr(Resource imageResource, AiModelConfigDto config) {
         return ocr(imageResource);
+    }
+
+    /**
+     * 结构化 OCR：返回带坐标和置信度的结果，用于 SearchablePdfBuilder 写文字层。
+     * <p>
+     * 默认抛 UnsupportedOperationException，仅 PaddleOcrProvider 实现
+     * (云端模型如 qwen-vl 不返回 bounding box，只能给纯文本)。
+     *
+     * @param imageResource 单页图片资源
+     * @param config        运行时配置；为 null 用 yml 默认
+     * @return 该页 OCR 结构化结果
+     */
+    default OcrPageResult ocrStructured(Resource imageResource, AiModelConfigDto config) {
+        throw new UnsupportedOperationException(getName() + " 不支持结构化 OCR");
     }
 }
