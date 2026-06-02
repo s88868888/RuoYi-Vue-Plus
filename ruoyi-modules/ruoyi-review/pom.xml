@@ -76,6 +76,12 @@
             <artifactId>ruoyi-common-ai</artifactId>
         </dependency>
 
+        <!-- SSE：审核进度流式推送 -->
+        <dependency>
+            <groupId>org.dromara</groupId>
+            <artifactId>ruoyi-common-sse</artifactId>
+        </dependency>
+
         <!-- 系统模块 -->
         <dependency>
             <groupId>org.dromara</groupId>

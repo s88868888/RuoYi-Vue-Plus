@@ -337,6 +337,8 @@ spring:
 
 --- # 智能审核 - 本地大模型与 OCR 配置
 review:
+  # 审核引擎：graph=新 Graph agentic 工作流（误判主动对比 + 自校验重审），legacy=原单次调用
+  engine: graph
   # 文本对比阶段的本地 Ollama 通道
   ai:
     local:

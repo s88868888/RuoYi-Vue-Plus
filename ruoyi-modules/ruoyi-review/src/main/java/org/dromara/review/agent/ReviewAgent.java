@@ -163,35 +163,9 @@ public class ReviewAgent {
             String knowledgeContext = reviewRagService.buildEnrichedContext(standardIds, queryText);
             String rulesText = buildRulesText(allRules);
 
-            // 5. 组装 Prompt
-            String outputFormat = template.getOutputFormat() != null ? template.getOutputFormat() : "";
-
-            // 构建 field_name 白名单（取规则的 check_field，没有就用 rule_<id>）
-            // 提示词模板里可用 {field_whitelist} 占位符引用，让运营在 DB 里灵活组织约束语
-            StringBuilder whitelistSb = new StringBuilder();
-            for (int i = 0; i < allRules.size(); i++) {
-                ReviewStandardRule r = allRules.get(i);
-                String field = (r.getCheckField() != null && !r.getCheckField().isBlank())
-                    ? r.getCheckField() : "rule_" + r.getId();
-                whitelistSb.append("  ").append(i + 1).append(". \"").append(field).append("\"");
-                if (r.getCategory() != null && !r.getCategory().isBlank()) {
-                    whitelistSb.append("  // ").append(r.getCategory());
-                }
-                whitelistSb.append("\n");
-            }
-            String fieldWhitelist = whitelistSb.toString();
-            String ruleCount = String.valueOf(allRules.size());
-
-            String systemPrompt = template.getSystemPrompt()
-                .replace("{rules}", rulesText)
-                .replace("{knowledge_context}", knowledgeContext)
-                .replace("{output_format}", outputFormat)
-                .replace("{field_whitelist}", fieldWhitelist)
-                .replace("{rule_count}", ruleCount);
-
-            String userPrompt = template.getUserPrompt()
-                .replace("{form_data}", task.getFormSnapshot() != null ? task.getFormSnapshot() : "{}")
-                .replace("{output_format}", outputFormat);
+            // 5. 组装 Prompt（抽取为 public 方法，供 Graph 编排节点复用）
+            String systemPrompt = buildSystemPrompt(template, rulesText, knowledgeContext, allRules);
+            String userPrompt = buildUserPrompt(template, task);
 
             // 6. 根据附件类型选择 AI 调用方式
             String aiResponse = callAi(files, systemPrompt, userPrompt, template, modelConfig);
@@ -233,6 +207,87 @@ public class ReviewAgent {
     }
 
     /**
+     * dry-run 执行（评测用）：跑完整 legacy 审核（加载 → RAG → 组装 prompt → 调 AI → 解析）
+     * 但不落库/不写知识库/不回调/不改任务状态，返回解析后的结果 JSON。
+     * <p>
+     * 注意：legacy 路径本就不含误判交叉核对与自校验，这正是与 graph 引擎对比的意义所在。
+     * 供双引擎对比端点调用。
+     *
+     * @param taskId 审核任务 ID
+     * @return 审核结果 JSON（含 items / pass_status / summary）；异常时返回带 error 字段的 JSON
+     */
+    public JSONObject executeDryRun(Long taskId) {
+        ReviewTask task = taskMapper.selectById(taskId);
+        if (task == null) {
+            throw new RuntimeException("审核任务不存在: " + taskId);
+        }
+        log.info("[ReviewAgent] 开始 legacy dry-run: taskId={}", taskId);
+        try {
+            List<ReviewTaskFile> files = taskFileMapper.selectList(
+                Wrappers.<ReviewTaskFile>lambdaQuery().eq(ReviewTaskFile::getTaskId, taskId));
+            List<Long> standardIds = loadStandardIds(taskId);
+            List<ReviewStandardRule> allRules = loadRules(standardIds);
+            ReviewPromptTemplate template = loadPromptTemplate(task.getTaskType());
+            AiModelConfigDto modelConfig = resolveModelConfig(template);
+
+            String queryText = task.getFormSnapshot() != null ? task.getFormSnapshot() : task.getTaskName();
+            String knowledgeContext = reviewRagService.buildEnrichedContext(standardIds, queryText);
+            String rulesText = buildRulesText(allRules);
+            String systemPrompt = buildSystemPrompt(template, rulesText, knowledgeContext, allRules);
+            String userPrompt = buildUserPrompt(template, task);
+
+            String aiResponse = callAi(files, systemPrompt, userPrompt, template, modelConfig);
+            return parseAiResponse(aiResponse);
+        } catch (Exception e) {
+            log.error("[ReviewAgent] legacy dry-run 失败: taskId={}", taskId, e);
+            JSONObject err = new JSONObject();
+            err.put("error", "legacy dry-run 异常: " + e.getMessage());
+            return err;
+        }
+    }
+
+    /**
+     * 组装 system prompt：填充规则、知识上下文、字段白名单等占位符。
+     * 抽取为 public，供 Graph 编排的 InitialReviewNode 复用，保持与 legacy execute() 完全一致的行为。
+     */
+    public String buildSystemPrompt(ReviewPromptTemplate template, String rulesText,
+                                    String knowledgeContext, List<ReviewStandardRule> allRules) {
+        String outputFormat = template.getOutputFormat() != null ? template.getOutputFormat() : "";
+
+        // 构建 field_name 白名单（取规则的 check_field，没有就用 rule_<id>）
+        StringBuilder whitelistSb = new StringBuilder();
+        for (int i = 0; i < allRules.size(); i++) {
+            ReviewStandardRule r = allRules.get(i);
+            String field = (r.getCheckField() != null && !r.getCheckField().isBlank())
+                ? r.getCheckField() : "rule_" + r.getId();
+            whitelistSb.append("  ").append(i + 1).append(". \"").append(field).append("\"");
+            if (r.getCategory() != null && !r.getCategory().isBlank()) {
+                whitelistSb.append("  // ").append(r.getCategory());
+            }
+            whitelistSb.append("\n");
+        }
+        String fieldWhitelist = whitelistSb.toString();
+        String ruleCount = String.valueOf(allRules.size());
+
+        return template.getSystemPrompt()
+            .replace("{rules}", rulesText)
+            .replace("{knowledge_context}", knowledgeContext)
+            .replace("{output_format}", outputFormat)
+            .replace("{field_whitelist}", fieldWhitelist)
+            .replace("{rule_count}", ruleCount);
+    }
+
+    /**
+     * 组装 user prompt：填充表单数据。抽取为 public 供 Graph 节点复用。
+     */
+    public String buildUserPrompt(ReviewPromptTemplate template, ReviewTask task) {
+        String outputFormat = template.getOutputFormat() != null ? template.getOutputFormat() : "";
+        return template.getUserPrompt()
+            .replace("{form_data}", task.getFormSnapshot() != null ? task.getFormSnapshot() : "{}")
+            .replace("{output_format}", outputFormat);
+    }
+
+    /**
      * 根据附件类型自动选择 AI 调用方式：
      * - 有图片附件 → qwen-vl 视觉模型（当前取第一张）
      * - 有文档附件 → 每份PDF探测文本层，打印件直接抽文本，扫描件逐页OCR；最终用 qwen-long / 本地大模型 做纯文本比对
@@ -242,8 +297,21 @@ public class ReviewAgent {
      * - 留空 / 任意 dashscope 模型名 → 走云端 qwen-long（chatLong）
      * - 以 {@code ollama:} 为前缀（如 {@code ollama:qwen3.6:35b-a3b-q4_K_M}） → 走本地 Ollama（chatLongLocal）
      */
-    private String callAi(List<ReviewTaskFile> files, String systemPrompt, String userPrompt,
+    public String callAi(List<ReviewTaskFile> files, String systemPrompt, String userPrompt,
                           ReviewPromptTemplate template, AiModelConfigDto modelConfig) {
+        // legacy 入口：不带预处理缓存，文档每次重新 OCR/抽文（与历史行为一致）
+        return callAi(files, systemPrompt, userPrompt, template, modelConfig, null);
+    }
+
+    /**
+     * 带"文档预处理缓存"的 AI 调用。
+     * <p>
+     * {@code cachedDocText} 非空时，文档场景直接复用该纯文本，跳过昂贵的下载 + OCR/抽文。
+     * 供 Graph 重审循环使用：第一轮预处理产出文本后缓存进 ReviewContext，第二轮重审直接复用，
+     * 避免文档内容没变却重复 OCR。为 null 时行为与 legacy 完全一致（每次重新预处理）。
+     */
+    public String callAi(List<ReviewTaskFile> files, String systemPrompt, String userPrompt,
+                          ReviewPromptTemplate template, AiModelConfigDto modelConfig, String cachedDocText) {
         List<ReviewTaskFile> imageFiles = files.stream()
             .filter(f -> isImageFile(f.getFileType())).toList();
         List<ReviewTaskFile> docFiles = files.stream()
@@ -289,34 +357,15 @@ public class ReviewAgent {
         }
 
         if (!docFiles.isEmpty()) {
-            log.info("[ReviewAgent] 检测到 {} 份文档附件，开始文本层探测 + OCR 预处理 (ocrConfigId={})",
-                docFiles.size(), template.getOcrConfigId());
             try {
-                long preStart = System.currentTimeMillis();
-                ExecutorService pool = getOcrExecutor();
-                // 双（或多）PDF 并发抽文 + OCR；按原顺序拼装
-                List<CompletableFuture<String>> docFutures = new ArrayList<>(docFiles.size());
-                for (int i = 0; i < docFiles.size(); i++) {
-                    final int idx = i;
-                    final ReviewTaskFile f = docFiles.get(i);
-                    docFutures.add(CompletableFuture.supplyAsync(() -> {
-                        try {
-                            String text = extractOrOcrPdf(f, template.getOcrConfigId());
-                            return "【文件" + (idx + 1) + "："
-                                + (f.getFileName() == null ? "未命名" : f.getFileName()) + "】\n"
-                                + text + "\n\n";
-                        } catch (Exception e) {
-                            throw new RuntimeException("文件预处理失败 [" + f.getFileName() + "]: " + e.getMessage(), e);
-                        }
-                    }, pool));
-                }
-                StringBuilder docsBlock = new StringBuilder();
-                for (CompletableFuture<String> ft : docFutures) {
-                    docsBlock.append(ft.join());
-                }
+                // 复用缓存的预处理文本（重审场景），否则现做 OCR/抽文
+                String docsBlock = (cachedDocText != null)
+                    ? cachedDocText
+                    : preprocessDocuments(docFiles, template);
                 String enrichedUser = docsBlock + "\n=== 审核任务指令 ===\n" + userPrompt;
-                log.info("[ReviewAgent] 文档预处理完成，文本总长度={}, 耗时={}ms",
-                    enrichedUser.length(), System.currentTimeMillis() - preStart);
+                if (cachedDocText != null) {
+                    log.info("[ReviewAgent] 复用已缓存的文档预处理文本（跳过 OCR），长度={}", docsBlock.length());
+                }
 
                 // 优先走 DB 配置（热切换，运营可在线编辑）
                 if (modelConfig != null) {
@@ -355,6 +404,54 @@ public class ReviewAgent {
         }
         log.info("[ReviewAgent] 无附件，使用文本模型 (qwen-plus)");
         return aiChatService.chat(systemPrompt, userPrompt);
+    }
+
+    /**
+     * 文档预处理：对文档附件并发执行"下载 + 文本层探测 + OCR/抽文"，按原顺序拼成纯文本块。
+     * <p>
+     * 抽取为 public，使 Graph 编排能把结果缓存到 ReviewContext，重审时复用、跳过重复 OCR。
+     * 自包含：内部按文件类型过滤出文档附件，无文档附件时返回空串。
+     *
+     * @param files    任务全部附件（内部自行过滤文档类）
+     * @param template 提示词模板（取 ocrConfigId）
+     * @return 拼接后的文档纯文本块（每份文件带【文件N：名】前缀），无文档返回空串
+     */
+    public String preprocessDocuments(List<ReviewTaskFile> files, ReviewPromptTemplate template) {
+        if (files == null || files.isEmpty()) {
+            return "";
+        }
+        List<ReviewTaskFile> docFiles = files.stream()
+            .filter(f -> isDocumentFile(f.getFileType())).toList();
+        if (docFiles.isEmpty()) {
+            return "";
+        }
+        log.info("[ReviewAgent] 检测到 {} 份文档附件，开始文本层探测 + OCR 预处理 (ocrConfigId={})",
+            docFiles.size(), template.getOcrConfigId());
+        long preStart = System.currentTimeMillis();
+        ExecutorService pool = getOcrExecutor();
+        // 双（或多）PDF 并发抽文 + OCR；按原顺序拼装
+        List<CompletableFuture<String>> docFutures = new ArrayList<>(docFiles.size());
+        for (int i = 0; i < docFiles.size(); i++) {
+            final int idx = i;
+            final ReviewTaskFile f = docFiles.get(i);
+            docFutures.add(CompletableFuture.supplyAsync(() -> {
+                try {
+                    String text = extractOrOcrPdf(f, template.getOcrConfigId());
+                    return "【文件" + (idx + 1) + "："
+                        + (f.getFileName() == null ? "未命名" : f.getFileName()) + "】\n"
+                        + text + "\n\n";
+                } catch (Exception e) {
+                    throw new RuntimeException("文件预处理失败 [" + f.getFileName() + "]: " + e.getMessage(), e);
+                }
+            }, pool));
+        }
+        StringBuilder docsBlock = new StringBuilder();
+        for (CompletableFuture<String> ft : docFutures) {
+            docsBlock.append(ft.join());
+        }
+        log.info("[ReviewAgent] 文档预处理完成，文本总长度={}, 耗时={}ms",
+            docsBlock.length(), System.currentTimeMillis() - preStart);
+        return docsBlock.toString();
     }
 
     /**
@@ -535,7 +632,7 @@ public class ReviewAgent {
         }
     }
 
-    private String determineModel(List<ReviewTaskFile> files, ReviewPromptTemplate template, AiModelConfigDto modelConfig) {
+    public String determineModel(List<ReviewTaskFile> files, ReviewPromptTemplate template, AiModelConfigDto modelConfig) {
         boolean hasImage = files.stream().anyMatch(f -> isImageFile(f.getFileType()));
         if (hasImage) {
             // 视觉走 chatWithImage，模型固定 qwen3-vl-plus；如果模板的 modelConfig
@@ -567,7 +664,7 @@ public class ReviewAgent {
     /**
      * 模板配置了 model_config_id → 取出 enabled DTO；为空或加载失败返回 null，让上层走 legacy 路径
      */
-    private AiModelConfigDto resolveModelConfig(ReviewPromptTemplate template) {
+    public AiModelConfigDto resolveModelConfig(ReviewPromptTemplate template) {
         if (template == null || template.getModelConfigId() == null) {
             return null;
         }
@@ -582,14 +679,14 @@ public class ReviewAgent {
 
     // ==================== 数据加载 ====================
 
-    private List<Long> loadStandardIds(Long taskId) {
+    public List<Long> loadStandardIds(Long taskId) {
         List<ReviewTaskStandard> taskStandards = taskStandardMapper.selectList(
             Wrappers.<ReviewTaskStandard>lambdaQuery().eq(ReviewTaskStandard::getTaskId, taskId)
         );
         return taskStandards.stream().map(ReviewTaskStandard::getStandardId).collect(Collectors.toList());
     }
 
-    private List<ReviewStandardRule> loadRules(List<Long> standardIds) {
+    public List<ReviewStandardRule> loadRules(List<Long> standardIds) {
         if (standardIds.isEmpty()) return List.of();
 
         List<ReviewStandardRule> allRules = standardRuleMapper.selectList(
@@ -616,7 +713,7 @@ public class ReviewAgent {
         return allRules;
     }
 
-    private ReviewPromptTemplate loadPromptTemplate(String taskType) {
+    public ReviewPromptTemplate loadPromptTemplate(String taskType) {
         ReviewPromptTemplate template = promptTemplateMapper.selectOne(
             Wrappers.<ReviewPromptTemplate>lambdaQuery()
                 .eq(ReviewPromptTemplate::getType, taskType)
@@ -637,7 +734,7 @@ public class ReviewAgent {
         return template;
     }
 
-    private String buildRulesText(List<ReviewStandardRule> rules) {
+    public String buildRulesText(List<ReviewStandardRule> rules) {
         StringBuilder sb = new StringBuilder();
         for (int i = 0; i < rules.size(); i++) {
             ReviewStandardRule rule = rules.get(i);
@@ -670,7 +767,7 @@ public class ReviewAgent {
 
     // ==================== 结果处理 ====================
 
-    private JSONObject parseAiResponse(String aiResponse) {
+    public JSONObject parseAiResponse(String aiResponse) {
         String jsonStr = aiResponse.trim();
         if (jsonStr.startsWith("```")) {
             int start = jsonStr.indexOf("{");
@@ -859,7 +956,7 @@ public class ReviewAgent {
         return sb.toString();
     }
 
-    private void saveResultItems(ReviewTask task, JSONObject result, List<ReviewStandardRule> rules) {
+    public void saveResultItems(ReviewTask task, JSONObject result, List<ReviewStandardRule> rules) {
         JSONArray items = result.getJSONArray("items");
         if (items == null || items.isEmpty()) {
             log.warn("[ReviewAgent] AI未返回审核明细项");
@@ -929,7 +1026,7 @@ public class ReviewAgent {
         }
     }
 
-    private void updateTaskStatus(ReviewTask task, JSONObject result, long duration, List<ReviewStandardRule> allRules, String modelUsed, String aiResponse) {
+    public void updateTaskStatus(ReviewTask task, JSONObject result, long duration, List<ReviewStandardRule> allRules, String modelUsed, String aiResponse) {
         task.setStatus("completed");
         task.setPassStatus(mapPassStatus(result.getString("pass_status")));
         task.setAiModel(modelUsed);
@@ -1043,7 +1140,7 @@ public class ReviewAgent {
 
     // ==================== 知识库沉淀 ====================
 
-    private void saveToKnowledgeCase(ReviewTask task, List<Long> standardIds) {
+    public void saveToKnowledgeCase(ReviewTask task, List<Long> standardIds) {
         try {
             if (standardIds.isEmpty()) return;
 
@@ -1139,7 +1236,7 @@ public class ReviewAgent {
      * 逻辑：统计同一知识库下相同 fieldName + severity 的非通过项出现次数，
      * 达到阈值（3次）时自动创建或更新问题模式。
      */
-    private void aggregatePatterns(ReviewTask task, List<Long> standardIds) {
+    public void aggregatePatterns(ReviewTask task, List<Long> standardIds) {
         try {
             if (standardIds.isEmpty()) return;
 
@@ -1311,7 +1408,7 @@ public class ReviewAgent {
      * 重试：失败时指数退避（2s/5s/10s），最多 3 次。
      * Payload：含 status/passStatus/score/errorCount/warningCount/infoCount/aiSummary/items。
      */
-    private void callbackExternalSystem(ReviewTask task) {
+    public void callbackExternalSystem(ReviewTask task) {
         if (task.getSourceType() == null || task.getSourceId() == null) {
             return;
         }

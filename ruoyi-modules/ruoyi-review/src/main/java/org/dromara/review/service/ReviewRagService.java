@@ -232,6 +232,30 @@ public class ReviewRagService {
     /**
      * 按类型从知识库集合中检索
      */
+    /**
+     * 针对单条问题项做误判记录的语义召回（供 Graph 误判交叉核对节点使用）。
+     * <p>
+     * 与 {@link #buildEnrichedContext} 开审前那次泛化检索不同：这里用"字段名 + AI 判定描述"作为
+     * query，对该问题项做针对性召回，命中的相似历史误判用于判断当前判定是否疑似误判。
+     *
+     * @param standardIds 任务关联的标准 ID（用于定位知识库集合）
+     * @param queryText   查询文本（建议传 字段名 + AI 判定理由）
+     * @param topK        召回条数
+     * @return 相似误判记录列表（已按相似度排序），向量库不可用时返回空列表
+     */
+    public List<VectorSearchResult> searchMisjudgments(List<Long> standardIds, String queryText, int topK) {
+        List<Long> knowledgeIds = getKnowledgeIds(standardIds);
+        if (knowledgeIds.isEmpty() || queryText == null || queryText.isBlank()) {
+            return List.of();
+        }
+        try {
+            return searchByType(knowledgeIds, queryText, "misjudgment", topK);
+        } catch (Exception e) {
+            log.warn("[RAG] 误判记录语义召回失败: query={}, err={}", queryText, e.getMessage());
+            return List.of();
+        }
+    }
+
     private List<VectorSearchResult> searchByType(List<Long> knowledgeIds, String queryText, String docType, int topK) {
         List<VectorSearchResult> allResults = new ArrayList<>();
 

@@ -33,6 +33,13 @@
             <version>1.1.2.0</version>
         </dependency>
 
+        <!-- Spring AI Alibaba Graph 工作流编排（审核 agentic 流程：误判对比、自校验、条件路由） -->
+        <dependency>
+            <groupId>com.alibaba.cloud.ai</groupId>
+            <artifactId>spring-ai-alibaba-graph-core</artifactId>
+            <version>1.1.2.0</version>
+        </dependency>
+
         <!-- DashScope ChatModel 支持 -->
         <dependency>
             <groupId>com.alibaba.cloud.ai</groupId>

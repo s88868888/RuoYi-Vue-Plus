@@ -19,6 +19,8 @@ import org.dromara.review.domain.bo.ReviewTaskBo;
 import org.dromara.review.domain.vo.ReviewResultItemVo;
 import org.dromara.review.domain.vo.ReviewTaskVo;
 import org.dromara.review.agent.ReviewAgent;
+import org.dromara.review.graph.ReviewGraphAgent;
+import org.springframework.beans.factory.annotation.Value;
 import org.dromara.review.domain.ReviewKnowledgeMisjudgment;
 import org.dromara.review.domain.ReviewStandardKnowledge;
 import org.dromara.review.domain.ReviewStandardRule;
@@ -64,7 +66,15 @@ public class ReviewTaskServiceImpl implements IReviewTaskService {
     private final ReviewStandardKnowledgeMapper standardKnowledgeMapper;
     private final ReviewStandardRuleMapper standardRuleMapper;
     private final ReviewAgent reviewAgent;
+    private final ReviewGraphAgent reviewGraphAgent;
     private final ReviewRagService reviewRagService;
+
+    /**
+     * 审核引擎灰度开关：graph=新 Graph agentic 工作流（误判对比+自校验），legacy=原单次调用。
+     * 默认 legacy，确认 graph 稳定后改默认值或按需切换。配置项 review.engine。
+     */
+    @Value("${review.engine:legacy}")
+    private String reviewEngine;
 
     /**
      * 通过 ApplicationContext 拿到自身代理对象，用于绕过 @Async 在内部调用时失效的问题。
@@ -320,7 +330,12 @@ public class ReviewTaskServiceImpl implements IReviewTaskService {
     @Async
     @Override
     public void executeReview(Long taskId) {
-        reviewAgent.execute(taskId);
+        if ("graph".equalsIgnoreCase(reviewEngine)) {
+            log.info("[ReviewTask] 使用 Graph 审核引擎 taskId={}", taskId);
+            reviewGraphAgent.execute(taskId);
+        } else {
+            reviewAgent.execute(taskId);
+        }
     }
 
     /**

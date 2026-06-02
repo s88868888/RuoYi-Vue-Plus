@@ -14,9 +14,11 @@ import org.dromara.common.mybatis.core.page.PageQuery;
 import org.dromara.common.mybatis.core.page.TableDataInfo;
 import org.dromara.common.web.core.BaseController;
 import org.dromara.review.domain.bo.ReviewTaskBo;
+import org.dromara.review.domain.vo.ReviewEngineCompareVo;
 import org.dromara.review.domain.vo.ReviewResultItemVo;
 import org.dromara.review.domain.vo.ReviewTaskVo;
 import org.dromara.review.service.IReviewTaskService;
+import org.dromara.review.service.ReviewEngineCompareService;
 import org.springframework.validation.annotation.Validated;
 import org.springframework.web.bind.annotation.*;
 
@@ -35,6 +37,7 @@ import java.util.Map;
 public class ReviewTaskController extends BaseController {
 
     private final IReviewTaskService reviewTaskService;
+    private final ReviewEngineCompareService reviewEngineCompareService;
 
     /**
      * 分页查询任务列表
@@ -125,5 +128,21 @@ public class ReviewTaskController extends BaseController {
     @GetMapping("/{id}/results")
     public R<List<ReviewResultItemVo>> listResults(@NotNull(message = "任务ID不能为空") @PathVariable Long id) {
         return R.ok(reviewTaskService.queryResultItems(id));
+    }
+
+    /**
+     * 双引擎(legacy vs graph)审核对比评测。
+     * <p>
+     * 对传入的任务分别用两种引擎 dry-run（只算不落库，不污染生产数据），返回指标差异报告。
+     * 用于量化 graph agentic 工作流（误判核对 + 自校验）相比 legacy 的准确率差异。
+     *
+     * @param taskIds 待对比的任务ID列表
+     */
+    @SaCheckPermission("review:task:list")
+    @Log(title = "审核引擎对比", businessType = BusinessType.OTHER)
+    @PostMapping("/compareEngines")
+    public R<List<ReviewEngineCompareVo>> compareEngines(
+        @NotEmpty(message = "任务ID列表不能为空") @RequestBody List<Long> taskIds) {
+        return R.ok(reviewEngineCompareService.compare(taskIds));
     }
 }
