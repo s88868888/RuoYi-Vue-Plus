@@ -21,8 +21,13 @@ import org.springframework.transaction.annotation.Transactional;
 import org.springframework.http.HttpEntity;
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.MediaType;
+import org.springframework.web.client.RestClientResponseException;
 import org.springframework.web.client.RestTemplate;
 
+import java.awt.Color;
+import java.awt.Graphics2D;
+import java.awt.image.BufferedImage;
+import java.io.ByteArrayOutputStream;
 import java.math.BigDecimal;
 import java.util.Base64;
 import java.util.Collection;
@@ -30,6 +35,8 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+
+import javax.imageio.ImageIO;
 
 /**
  * AI 模型配置 Service 实现
@@ -165,12 +172,36 @@ public class ReviewModelConfigServiceImpl implements IReviewModelConfigService {
     // ==================== 测试连接 ====================
 
     /**
-     * 16x16 透明 PNG，用于 OCR 类 provider 的最小调用样本。
-     * 不能用 1x1：qwen3-vl-plus 要求图片长宽至少 10px，否则返回 InvalidParameter。
+     * OCR 类 provider 连接测试用的最小样本图。
+     * <p>
+     * 必须是「不透明、有实际内容、尺寸足够」的图：
+     * PaddleX PP-OCRv5 serve 对 1x1 / 全透明的图会返回 HTTP 422「Invalid input file」，
+     * qwen3-vl-plus 也要求长宽至少 10px。这里运行时生成一张 320x80 白底黑字「OCR TEST」PNG，
+     * 既能通过输入校验，又能让 OCR 真正跑通管线（返回 errorCode=0，甚至识别出文字）。
      */
-    private static final byte[] TINY_PNG = Base64.getDecoder().decode(
-        "iVBORw0KGgoAAAANSUhEUgAAABAAAAAQCAQAAAC1+jfqAAAAEElEQVR42mNkYGD4z0AswAAFiwEBnQfWnwAAAABJRU5ErkJggg=="
-    );
+    private static final byte[] TEST_IMAGE_PNG = buildTestImagePng();
+
+    private static byte[] buildTestImagePng() {
+        try {
+            int w = 320, h = 80;
+            BufferedImage img = new BufferedImage(w, h, BufferedImage.TYPE_INT_RGB);
+            Graphics2D g = img.createGraphics();
+            g.setColor(Color.WHITE);
+            g.fillRect(0, 0, w, h);
+            g.setColor(Color.BLACK);
+            g.setFont(g.getFont().deriveFont(36f));
+            g.drawString("OCR TEST", 24, 52);
+            g.dispose();
+            ByteArrayOutputStream out = new ByteArrayOutputStream();
+            ImageIO.write(img, "png", out);
+            return out.toByteArray();
+        } catch (Exception e) {
+            // 理论上不会失败；兜底返回 16x16 不透明白底 PNG（仍优于全透明）
+            return Base64.getDecoder().decode(
+                "iVBORw0KGgoAAAANSUhEUgAAABAAAAAQCAIAAACQkWg2AAAAFklEQVR4nGP8//8/Aw"
+                + "MDAwMDEwMDAwMDAB8YBAUVj7BLAAAAAElFTkSuQmCC");
+        }
+    }
 
     @Override
     public ReviewModelConfigTestVo testConnection(ReviewModelConfigBo bo) {
@@ -218,14 +249,15 @@ public class ReviewModelConfigServiceImpl implements IReviewModelConfigService {
     }
 
     private ReviewModelConfigTestVo testPaddleOcr(AiModelConfigDto cfg, String endpoint, long start) {
-        // 直接发一个 1x1 透明 PNG 到 PaddleX serve，能拿到 errorCode=0 即认为通
+        // 发一张 320x80 白底黑字 PNG 到 PaddleX serve，能拿到 errorCode=0 即认为通。
+        // 不能用 1x1 / 全透明图：PaddleX 会返回 HTTP 422「Invalid input file」。
         if (cfg.getBaseUrl() == null || cfg.getBaseUrl().isBlank()) {
             return ReviewModelConfigTestVo.fail("paddleocr", 0, "PaddleOCR 必须填 baseUrl", endpoint);
         }
         try {
             RestTemplate rt = new RestTemplate();
             Map<String, Object> body = new HashMap<>();
-            body.put("file", Base64.getEncoder().encodeToString(TINY_PNG));
+            body.put("file", Base64.getEncoder().encodeToString(TEST_IMAGE_PNG));
             body.put("fileType", 1);
             body.put("useDocOrientationClassify", false);
             body.put("useDocUnwarping", false);
@@ -237,10 +269,19 @@ public class ReviewModelConfigServiceImpl implements IReviewModelConfigService {
             String resp = rt.postForObject(cfg.getBaseUrl(), entity, String.class);
             // resp 可能很长，只取 errorCode/errorMsg 段
             String msg = resp == null ? "(empty)" : (resp.length() > 200 ? resp.substring(0, 200) + "..." : resp);
-            return ReviewModelConfigTestVo.success("paddleocr 1x1",
+            return ReviewModelConfigTestVo.success("paddleocr 测试图",
                 System.currentTimeMillis() - start, msg, endpoint);
+        } catch (RestClientResponseException re) {
+            // 把 PaddleX serve 返回的响应体带出来，方便定位 422/500 等具体原因
+            String respBody = re.getResponseBodyAsString();
+            if (respBody != null && respBody.length() > 300) respBody = respBody.substring(0, 300) + "...";
+            return ReviewModelConfigTestVo.fail("paddleocr 测试图",
+                System.currentTimeMillis() - start,
+                "HTTP " + re.getRawStatusCode() + " " + re.getStatusText()
+                    + (respBody == null || respBody.isBlank() ? "" : " | " + respBody),
+                endpoint);
         } catch (Exception e) {
-            return ReviewModelConfigTestVo.fail("paddleocr 1x1",
+            return ReviewModelConfigTestVo.fail("paddleocr 测试图",
                 System.currentTimeMillis() - start,
                 e.getMessage() == null ? e.getClass().getSimpleName() : e.getMessage(),
                 endpoint);
@@ -250,15 +291,15 @@ public class ReviewModelConfigServiceImpl implements IReviewModelConfigService {
     private ReviewModelConfigTestVo testQwenVlOcr(AiModelConfigDto cfg, String endpoint, long start) {
         try {
             // 复用 OcrProviderFactory.ocrWithConfig 但配置不在 DB 里，直接走 AiChatService
-            ByteArrayResource res = new ByteArrayResource(TINY_PNG) {
-                @Override public String getFilename() { return "test-1x1.png"; }
+            ByteArrayResource res = new ByteArrayResource(TEST_IMAGE_PNG) {
+                @Override public String getFilename() { return "ocr-test.png"; }
             };
             String text = aiChatService.ocrImage(res);
-            return ReviewModelConfigTestVo.success("qwen-vl-ocr 1x1",
+            return ReviewModelConfigTestVo.success("qwen-vl-ocr 测试图",
                 System.currentTimeMillis() - start,
                 "调用成功，识别结果：" + (text == null ? "" : text.trim()), endpoint);
         } catch (Exception e) {
-            return ReviewModelConfigTestVo.fail("qwen-vl-ocr 1x1",
+            return ReviewModelConfigTestVo.fail("qwen-vl-ocr 测试图",
                 System.currentTimeMillis() - start,
                 e.getMessage() == null ? e.getClass().getSimpleName() : e.getMessage(),
                 endpoint);
