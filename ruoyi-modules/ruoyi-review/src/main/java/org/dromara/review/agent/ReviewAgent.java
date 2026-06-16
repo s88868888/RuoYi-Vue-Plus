@@ -1503,6 +1503,24 @@ public class ReviewAgent {
             }
         }
 
+        // 关注分类列表：从规则库动态读取 focus_enabled=1 的分类（前端用于生成过滤按钮和缺漏占位）
+        List<Long> stdIds = taskStandardMapper.selectList(
+            Wrappers.<ReviewTaskStandard>lambdaQuery().eq(ReviewTaskStandard::getTaskId, task.getId())
+        ).stream().map(ReviewTaskStandard::getStandardId).collect(java.util.stream.Collectors.toList());
+        if (!stdIds.isEmpty()) {
+            List<ReviewStandardRule> rules = standardRuleMapper.selectList(
+                Wrappers.<ReviewStandardRule>lambdaQuery().in(ReviewStandardRule::getStandardId, stdIds));
+            java.util.LinkedHashSet<String> cats = new java.util.LinkedHashSet<>();
+            for (ReviewStandardRule r : rules) {
+                if ("1".equals(r.getFocusEnabled()) && r.getCategory() != null && !r.getCategory().isBlank()) {
+                    cats.add(r.getCategory());
+                }
+            }
+            if (!cats.isEmpty()) {
+                payload.put("focusCategories", new JSONArray(new java.util.ArrayList<>(cats)));
+            }
+        }
+
         String body = payload.toJSONString();
         String timestamp = String.valueOf(System.currentTimeMillis());
         String signature = sign(timestamp + "." + body, webhookSecret);
