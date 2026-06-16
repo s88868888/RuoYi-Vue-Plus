@@ -276,15 +276,35 @@ public class ReviewAgent {
                 focusCats.add(r.getCategory());
             }
         }
-        String focusCategories = focusCats.isEmpty() ? "（无需提取 focus_items）" : String.join(", ", focusCats);
 
-        return template.getSystemPrompt()
+        // 动态生成关注列表指令段（不写死在 prompt 模板中，从规则库动态读取）
+        String focusInstruction = "";
+        if (!focusCats.isEmpty()) {
+            String catList = String.join(", ", focusCats);
+            focusInstruction = "\n\n【关注列表 focus_items·严格约束】除 items 外，还需输出 focus_items 数组。\n"
+                + "严格规则：\n"
+                + "1) category 只允许从以下已启用分类中选取：" + catList + "\n"
+                + "2) 禁止输出上述列表之外的任何 category，违反视为严重错误\n"
+                + "3) 对每个已启用分类，从文档中提取该分类最关键的文本片段（原文，不要省略号缩写）\n"
+                + "4) 若文档中确实找不到该分类相关内容，该分类不输出（不要凑数）\n"
+                + "5) extracted_value 必须是文档原文片段，禁止用省略号(...)缩写\n"
+                + "6) 每条含 category/field_label/extracted_value/location/confidence\n"
+                + "7) focus_items 用于辅助人工定位关键内容，不计入审核评分";
+        } else {
+            focusInstruction = "\n\n【关注列表】focus_items 输出空数组[]即可，无需提取。";
+        }
+
+        String basePrompt = template.getSystemPrompt()
             .replace("{rules}", rulesText)
             .replace("{knowledge_context}", knowledgeContext)
             .replace("{output_format}", outputFormat)
             .replace("{field_whitelist}", fieldWhitelist)
-            .replace("{rule_count}", ruleCount)
-            .replace("{focus_categories}", focusCategories);
+            .replace("{rule_count}", ruleCount);
+        // 兼容：如果模板里还残留 {focus_categories} 占位符则替换掉，否则直接追加
+        if (basePrompt.contains("{focus_categories}")) {
+            basePrompt = basePrompt.replace("{focus_categories}", focusCats.isEmpty() ? "（无）" : String.join(", ", focusCats));
+        }
+        return basePrompt + focusInstruction;
     }
 
     /**
