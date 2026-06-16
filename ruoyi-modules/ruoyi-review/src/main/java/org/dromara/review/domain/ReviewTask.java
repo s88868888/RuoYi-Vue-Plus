@@ -99,6 +99,11 @@ public class ReviewTask extends TenantEntity {
     private String resultJson;
 
     /**
+     * 关注列表JSON（AI提取的各分类文本片段，非问题项）
+     */
+    private String focusData;
+
+    /**
      * AI审核报告Markdown
      */
     private String resultMarkdown;

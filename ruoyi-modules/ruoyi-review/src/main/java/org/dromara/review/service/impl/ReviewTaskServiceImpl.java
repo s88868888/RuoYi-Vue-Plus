@@ -181,20 +181,23 @@ public class ReviewTaskServiceImpl implements IReviewTaskService {
     /**
      * 创建审核任务（含关联标准、保存附件、自动触发AI审核）
      *
-     * 同来源(sourceId+sourceType)已存在记录时不再 INSERT，而是 UPDATE 原行：
+     * 同来源(sourceId+sourceType+taskType)已存在记录时不再 INSERT，而是 UPDATE 原行：
      *   version+1、清理旧附件/标准/结果明细、状态重置后重跑审核。
      * 这样列表里「审核次数」始终对应同一文档的累计次数，不会因为多次重审产生多行。
+     * 同一业务对象的不同审核类型（如 COMPARE 与 CONTENT_AUDIT）各自保有独立的任务行。
      */
     @Override
     @Transactional(rollbackFor = Exception.class)
     public Long createTask(ReviewTaskBo bo) {
         // 1. 命中同来源旧任务 → 走"复用同一行"分支
+        //    去重键: sourceId + sourceType + taskType，保证同一业务对象的不同审核类型各自独立
         ReviewTask existing = null;
         if (StringUtils.isNotBlank(bo.getSourceId()) && StringUtils.isNotBlank(bo.getSourceType())) {
             existing = baseMapper.selectOne(
                 Wrappers.<ReviewTask>lambdaQuery()
                     .eq(ReviewTask::getSourceId, bo.getSourceId())
                     .eq(ReviewTask::getSourceType, bo.getSourceType())
+                    .eq(StringUtils.isNotBlank(bo.getTaskType()), ReviewTask::getTaskType, bo.getTaskType())
                     .orderByDesc(ReviewTask::getCreateTime)
                     .last("LIMIT 1")
             );

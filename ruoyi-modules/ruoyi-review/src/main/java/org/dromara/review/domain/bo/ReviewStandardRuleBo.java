@@ -74,4 +74,9 @@ public class ReviewStandardRuleBo extends BaseEntity {
      */
     private String status;
 
+    /**
+     * 是否启用关注（0=不关注 1=关注）
+     */
+    private String focusEnabled;
+
 }

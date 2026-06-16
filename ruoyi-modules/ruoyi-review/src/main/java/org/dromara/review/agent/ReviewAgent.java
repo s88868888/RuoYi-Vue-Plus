@@ -269,12 +269,22 @@ public class ReviewAgent {
         String fieldWhitelist = whitelistSb.toString();
         String ruleCount = String.valueOf(allRules.size());
 
+        // 构建 focus_categories：只列出 focusEnabled=1 的规则对应的分类（去重）
+        java.util.LinkedHashSet<String> focusCats = new java.util.LinkedHashSet<>();
+        for (ReviewStandardRule r : allRules) {
+            if ("1".equals(r.getFocusEnabled()) && r.getCategory() != null && !r.getCategory().isBlank()) {
+                focusCats.add(r.getCategory());
+            }
+        }
+        String focusCategories = focusCats.isEmpty() ? "（无需提取 focus_items）" : String.join(", ", focusCats);
+
         return template.getSystemPrompt()
             .replace("{rules}", rulesText)
             .replace("{knowledge_context}", knowledgeContext)
             .replace("{output_format}", outputFormat)
             .replace("{field_whitelist}", fieldWhitelist)
-            .replace("{rule_count}", ruleCount);
+            .replace("{rule_count}", ruleCount)
+            .replace("{focus_categories}", focusCategories);
     }
 
     /**
@@ -1036,6 +1046,12 @@ public class ReviewAgent {
         task.setResultMarkdown(result.getString("detail_markdown"));
         task.setTotalRules(allRules.size());
 
+        // 关注列表：AI 输出的 focus_items（各分类文本片段，非问题项）存储到 task
+        JSONArray focusItems = result.getJSONArray("focus_items");
+        if (focusItems != null && !focusItems.isEmpty()) {
+            task.setFocusData(focusItems.toJSONString());
+        }
+
         JSONArray items = result.getJSONArray("items");
         int errorCount = 0, warningCount = 0, infoCount = 0, passCount = 0;
         if (items != null) {
@@ -1457,6 +1473,15 @@ public class ReviewAgent {
             }
         }
         payload.put("items", itemArr);
+
+        // 关注列表：AI提取的各分类文本片段（非问题项），已存储在 task.focusData
+        if (task.getFocusData() != null && !task.getFocusData().isBlank()) {
+            try {
+                payload.put("focusItems", JSON.parseArray(task.getFocusData()));
+            } catch (Exception e) {
+                log.warn("[ReviewAgent] 解析 focusData 失败, taskId={}, err={}", task.getId(), e.getMessage());
+            }
+        }
 
         String body = payload.toJSONString();
         String timestamp = String.valueOf(System.currentTimeMillis());

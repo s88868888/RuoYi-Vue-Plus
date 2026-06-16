@@ -104,6 +104,11 @@ public class ReviewStandardRuleVo implements Serializable {
     private String status;
 
     /**
+     * 是否启用关注（0=不关注 1=关注）
+     */
+    private String focusEnabled;
+
+    /**
      * 创建时间
      */
     @ExcelProperty(value = "创建时间")

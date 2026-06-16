@@ -7,7 +7,6 @@ import lombok.RequiredArgsConstructor;
 import org.dromara.common.core.domain.R;
 import org.dromara.common.core.validate.AddGroup;
 import org.dromara.common.core.validate.EditGroup;
-import org.dromara.common.idempotent.annotation.RepeatSubmit;
 import org.dromara.common.log.annotation.Log;
 import org.dromara.common.log.enums.BusinessType;
 import org.dromara.common.mybatis.core.page.PageQuery;
@@ -61,7 +60,6 @@ public class ReviewTaskController extends BaseController {
      * 创建审核任务
      */
     @Log(title = "审核任务", businessType = BusinessType.INSERT)
-    @RepeatSubmit()
     @PostMapping()
     public R<Long> add(@Validated(AddGroup.class) @RequestBody ReviewTaskBo bo) {
         return R.ok(reviewTaskService.createTask(bo));
@@ -74,7 +72,6 @@ public class ReviewTaskController extends BaseController {
      * 接口立刻返回 taskId，AI 审核在后台异步跑，完成后通过 callbackUrl 回调。
      */
     @Log(title = "创建并执行审核", businessType = BusinessType.INSERT)
-    @RepeatSubmit()
     @PostMapping("/createAndExecute")
     public R<Long> createAndExecute(@Validated(AddGroup.class) @RequestBody ReviewTaskBo bo) {
         bo.setAutoExecute(true);

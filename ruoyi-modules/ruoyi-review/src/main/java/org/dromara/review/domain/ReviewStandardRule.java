@@ -89,4 +89,9 @@ public class ReviewStandardRule extends TenantEntity {
      */
     private String status;
 
+    /**
+     * 是否启用关注（0=不关注 1=关注），开启后该规则对应的分类参与关注列表提取
+     */
+    private String focusEnabled;
+
 }
