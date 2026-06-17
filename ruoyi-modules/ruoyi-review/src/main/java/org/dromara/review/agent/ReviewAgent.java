@@ -1017,11 +1017,18 @@ public class ReviewAgent {
             resultItem.setFormValue(item.getString("form_value"));
             resultItem.setExtractedValue(item.getString("extracted_value"));
 
-            // 规则命中关联
+            // 规则命中关联：与提示词白名单生成口径保持一致——
+            // 规则有 check_field 时按 check_field 匹配，否则回退按 "rule_<id>" 匹配，
+            // 否则无 check_field 的规则（如内容审查规则）永远关联不上，rule_id 为空，
+            // 会导致知识库沉淀全部被跳过。
             String fieldName = resultItem.getFieldName();
             if (fieldName != null) {
                 rules.stream()
-                    .filter(r -> fieldName.equals(r.getCheckField()))
+                    .filter(r -> {
+                        String field = (r.getCheckField() != null && !r.getCheckField().isBlank())
+                            ? r.getCheckField() : "rule_" + r.getId();
+                        return fieldName.equals(field);
+                    })
                     .findFirst()
                     .ifPresent(r -> {
                         resultItem.setRuleId(r.getId());
