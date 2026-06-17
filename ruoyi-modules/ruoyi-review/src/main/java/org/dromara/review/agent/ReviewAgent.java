@@ -269,27 +269,43 @@ public class ReviewAgent {
         String fieldWhitelist = whitelistSb.toString();
         String ruleCount = String.valueOf(allRules.size());
 
-        // 构建 focus_categories：只列出 focusEnabled=1 的规则对应的分类（去重）
+        // 构建 focus_keywords：收集 focusEnabled=1 且填写了关注要点的规则
+        // 每个要点 = 一个精确提取指令（一条规则的 focusKeyword 可含多要点，按换行/分号拆分）
+        // 旧的"按分类自由挑一段"逻辑已废弃：没填要点的关注规则不再提取
+        java.util.List<String[]> focusPoints = new java.util.ArrayList<>(); // [keyword, category]
         java.util.LinkedHashSet<String> focusCats = new java.util.LinkedHashSet<>();
         for (ReviewStandardRule r : allRules) {
-            if ("1".equals(r.getFocusEnabled()) && r.getCategory() != null && !r.getCategory().isBlank()) {
-                focusCats.add(r.getCategory());
+            if (!"1".equals(r.getFocusEnabled())) continue;
+            if (r.getFocusKeyword() == null || r.getFocusKeyword().isBlank()) continue;
+            String cat = (r.getCategory() != null && !r.getCategory().isBlank()) ? r.getCategory() : "";
+            if (!cat.isEmpty()) focusCats.add(cat);
+            for (String kw : r.getFocusKeyword().split("[\\n;；]")) {
+                String point = kw.trim();
+                if (!point.isEmpty()) focusPoints.add(new String[]{point, cat});
             }
         }
 
         // 动态生成关注列表指令段（不写死在 prompt 模板中，从规则库动态读取）
         String focusInstruction = "";
-        if (!focusCats.isEmpty()) {
-            String catList = String.join(", ", focusCats);
+        if (!focusPoints.isEmpty()) {
+            StringBuilder pointSb = new StringBuilder();
+            for (int i = 0; i < focusPoints.size(); i++) {
+                String[] p = focusPoints.get(i);
+                pointSb.append("  ").append(i + 1).append(". 关注要点：\"").append(p[0]).append("\"");
+                if (!p[1].isEmpty()) pointSb.append("（分类：").append(p[1]).append("）");
+                pointSb.append("\n");
+            }
             focusInstruction = "\n\n【关注列表 focus_items·严格约束】除 items 外，还需输出 focus_items 数组。\n"
+                + "需要逐一定位的关注要点如下：\n" + pointSb
                 + "严格规则：\n"
-                + "1) category 只允许从以下已启用分类中选取：" + catList + "\n"
-                + "2) 禁止输出上述列表之外的任何 category，违反视为严重错误\n"
-                + "3) 对每个已启用分类，从文档中提取该分类最关键的文本片段（原文，不要省略号缩写）\n"
-                + "4) 若文档中确实找不到该分类相关内容，该分类不输出（不要凑数）\n"
-                + "5) extracted_value 必须是文档原文片段，禁止用省略号(...)缩写\n"
-                + "6) 每条含 category/field_label/extracted_value/location/confidence\n"
-                + "7) focus_items 用于辅助人工定位关键内容，不计入审核评分";
+                + "1) 针对上述每个关注要点，在文档中找出与该要点最相关的原文片段\n"
+                + "2) 每条 focus_item 含字段：keyword（对应的关注要点原文，从上方列表逐字复制）、"
+                + "category（该要点所属分类，无则空串）、field_label（要点的简短人类可读标题）、"
+                + "extracted_value（文档原文片段）、location（页码/段落定位）、confidence（0~1置信度）\n"
+                + "3) extracted_value 必须是文档原文片段，禁止用省略号(...)缩写、禁止改写\n"
+                + "4) 若文档中确实找不到某要点对应内容，该要点仍输出一条，extracted_value 置空字符串\"\"（供前端标记缺漏），不要凭空编造\n"
+                + "5) keyword 只允许从上方关注要点列表中选取，禁止自创\n"
+                + "6) focus_items 用于辅助人工定位关键内容，不计入审核评分";
         } else {
             focusInstruction = "\n\n【关注列表】focus_items 输出空数组[]即可，无需提取。";
         }
@@ -1510,19 +1526,35 @@ public class ReviewAgent {
             }
         }
 
-        // 关注分类列表：从规则库动态读取 focus_enabled=1 的分类（前端用于生成过滤按钮和缺漏占位）
+        // 关注要点列表：从规则库动态读取 focusEnabled=1 且填写了 focusKeyword 的要点
+        // （前端用于生成要点过滤项 + 缺漏占位；keyword 为前端与 focus_items 关联的主键）
         List<Long> stdIds = taskStandardMapper.selectList(
             Wrappers.<ReviewTaskStandard>lambdaQuery().eq(ReviewTaskStandard::getTaskId, task.getId())
         ).stream().map(ReviewTaskStandard::getStandardId).collect(java.util.stream.Collectors.toList());
         if (!stdIds.isEmpty()) {
             List<ReviewStandardRule> rules = standardRuleMapper.selectList(
                 Wrappers.<ReviewStandardRule>lambdaQuery().in(ReviewStandardRule::getStandardId, stdIds));
+            JSONArray keywordArr = new JSONArray();
+            java.util.LinkedHashSet<String> seen = new java.util.LinkedHashSet<>();
             java.util.LinkedHashSet<String> cats = new java.util.LinkedHashSet<>();
             for (ReviewStandardRule r : rules) {
-                if ("1".equals(r.getFocusEnabled()) && r.getCategory() != null && !r.getCategory().isBlank()) {
-                    cats.add(r.getCategory());
+                if (!"1".equals(r.getFocusEnabled())) continue;
+                if (r.getFocusKeyword() == null || r.getFocusKeyword().isBlank()) continue;
+                String cat = (r.getCategory() != null && !r.getCategory().isBlank()) ? r.getCategory() : "";
+                for (String kw : r.getFocusKeyword().split("[\\n;；]")) {
+                    String point = kw.trim();
+                    if (point.isEmpty() || !seen.add(point)) continue;
+                    JSONObject o = new JSONObject();
+                    o.put("keyword", point);
+                    o.put("category", cat);
+                    keywordArr.add(o);
+                    if (!cat.isEmpty()) cats.add(cat);
                 }
             }
+            if (!keywordArr.isEmpty()) {
+                payload.put("focusKeywords", keywordArr);
+            }
+            // 兼容前端旧的分类过滤展示
             if (!cats.isEmpty()) {
                 payload.put("focusCategories", new JSONArray(new java.util.ArrayList<>(cats)));
             }

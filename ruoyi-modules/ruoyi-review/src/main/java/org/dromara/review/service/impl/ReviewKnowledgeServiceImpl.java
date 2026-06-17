@@ -15,6 +15,7 @@ import org.dromara.review.domain.ReviewKnowledgeCase;
 import org.dromara.review.domain.ReviewKnowledgeMisjudgment;
 import org.dromara.review.domain.ReviewKnowledgePattern;
 import org.dromara.review.domain.ReviewStandardKnowledge;
+import org.dromara.review.domain.ReviewStandardRule;
 import org.dromara.review.domain.bo.ReviewKnowledgeBo;
 import org.dromara.review.domain.vo.ReviewKnowledgeVo;
 import org.dromara.review.domain.vo.ReviewStandardVo;
@@ -24,6 +25,7 @@ import org.dromara.review.mapper.ReviewKnowledgeMisjudgmentMapper;
 import org.dromara.review.mapper.ReviewKnowledgePatternMapper;
 import org.dromara.review.mapper.ReviewStandardKnowledgeMapper;
 import org.dromara.review.mapper.ReviewStandardMapper;
+import org.dromara.review.mapper.ReviewStandardRuleMapper;
 import org.dromara.review.service.IReviewKnowledgeService;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
@@ -50,6 +52,7 @@ public class ReviewKnowledgeServiceImpl implements IReviewKnowledgeService {
     private final ReviewKnowledgeMisjudgmentMapper misjudgmentMapper;
     private final ReviewStandardKnowledgeMapper standardKnowledgeMapper;
     private final ReviewStandardMapper standardMapper;
+    private final ReviewStandardRuleMapper standardRuleMapper;
 
     /**
      * 查询审核知识库
@@ -165,7 +168,18 @@ public class ReviewKnowledgeServiceImpl implements IReviewKnowledgeService {
         List<Long> standardIds = skList.stream()
             .map(ReviewStandardKnowledge::getStandardId)
             .collect(Collectors.toList());
-        return standardMapper.selectVoByIds(standardIds);
+        List<ReviewStandardVo> standards = standardMapper.selectVoByIds(standardIds);
+        // rule_count 字段在表中未维护（恒为0），与标准列表/详情接口口径保持一致，动态统计规则数
+        java.util.Map<Long, Long> countMap = standardRuleMapper.selectList(
+                Wrappers.<ReviewStandardRule>lambdaQuery()
+                    .select(ReviewStandardRule::getStandardId)
+                    .in(ReviewStandardRule::getStandardId, standardIds)
+            ).stream()
+            .collect(Collectors.groupingBy(ReviewStandardRule::getStandardId, Collectors.counting()));
+        for (ReviewStandardVo vo : standards) {
+            vo.setRuleCount(countMap.getOrDefault(vo.getId(), 0L).intValue());
+        }
+        return standards;
     }
 
     @Override
