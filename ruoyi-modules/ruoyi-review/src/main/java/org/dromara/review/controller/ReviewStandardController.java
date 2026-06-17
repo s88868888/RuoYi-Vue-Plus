@@ -15,12 +15,15 @@ import org.dromara.common.mybatis.core.page.PageQuery;
 import org.dromara.common.mybatis.core.page.TableDataInfo;
 import org.dromara.common.web.core.BaseController;
 import org.dromara.review.domain.bo.ReviewStandardBo;
+import org.dromara.review.domain.bo.ReviewStandardFocusBo;
 import org.dromara.review.domain.bo.ReviewStandardRuleBo;
 import org.dromara.review.domain.vo.ParsedRuleVo;
 import org.dromara.review.domain.vo.ReviewKnowledgeVo;
+import org.dromara.review.domain.vo.ReviewStandardFocusVo;
 import org.dromara.review.domain.vo.ReviewStandardRuleExportVo;
 import org.dromara.review.domain.vo.ReviewStandardRuleVo;
 import org.dromara.review.domain.vo.ReviewStandardVo;
+import org.dromara.review.service.IReviewStandardFocusService;
 import org.dromara.review.service.IReviewStandardRuleService;
 import org.dromara.review.service.IReviewStandardService;
 import org.dromara.review.service.ReviewStandardParseService;
@@ -44,6 +47,7 @@ public class ReviewStandardController extends BaseController {
 
     private final IReviewStandardService reviewStandardService;
     private final IReviewStandardRuleService reviewStandardRuleService;
+    private final IReviewStandardFocusService reviewStandardFocusService;
     private final ReviewStandardParseService reviewStandardParseService;
 
     /**
@@ -197,6 +201,53 @@ public class ReviewStandardController extends BaseController {
             return vo;
         }).toList();
         org.dromara.common.excel.utils.ExcelUtil.exportExcel(exportList, "规则列表", ReviewStandardRuleExportVo.class, response);
+    }
+
+    // ==================== 关注列表子资源 ====================
+
+    /**
+     * 查询标准下的关注要点列表
+     *
+     * @param standardId 标准ID
+     */
+    @SaCheckPermission("review:standard:query")
+    @GetMapping("/{standardId}/focus")
+    public R<List<ReviewStandardFocusVo>> listFocus(@NotNull(message = "标准ID不能为空") @PathVariable Long standardId) {
+        return R.ok(reviewStandardFocusService.queryListByStandardId(standardId));
+    }
+
+    /**
+     * 新增关注要点
+     */
+    @SaCheckPermission("review:standard:edit")
+    @Log(title = "审核标准关注要点", businessType = BusinessType.INSERT)
+    @RepeatSubmit()
+    @PostMapping("/focus")
+    public R<Void> addFocus(@Validated(AddGroup.class) @RequestBody ReviewStandardFocusBo bo) {
+        return toAjax(reviewStandardFocusService.insertByBo(bo));
+    }
+
+    /**
+     * 修改关注要点
+     */
+    @SaCheckPermission("review:standard:edit")
+    @Log(title = "审核标准关注要点", businessType = BusinessType.UPDATE)
+    @RepeatSubmit()
+    @PutMapping("/focus")
+    public R<Void> editFocus(@Validated(EditGroup.class) @RequestBody ReviewStandardFocusBo bo) {
+        return toAjax(reviewStandardFocusService.updateByBo(bo));
+    }
+
+    /**
+     * 删除关注要点
+     *
+     * @param ids 主键串
+     */
+    @SaCheckPermission("review:standard:edit")
+    @Log(title = "审核标准关注要点", businessType = BusinessType.DELETE)
+    @DeleteMapping("/focus/{ids}")
+    public R<Void> removeFocus(@NotEmpty(message = "主键不能为空") @PathVariable Long[] ids) {
+        return toAjax(reviewStandardFocusService.deleteByIds(List.of(ids)));
     }
 
     // ==================== 规则导入 / AI 抽取 ====================

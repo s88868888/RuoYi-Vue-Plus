@@ -8,18 +8,18 @@ import lombok.EqualsAndHashCode;
 import org.dromara.common.core.validate.AddGroup;
 import org.dromara.common.core.validate.EditGroup;
 import org.dromara.common.mybatis.core.domain.BaseEntity;
-import org.dromara.review.domain.ReviewStandardRule;
+import org.dromara.review.domain.ReviewStandardFocus;
 
 /**
- * 审核标准规则业务对象 review_standard_rule
+ * 审核标准关注要点业务对象 review_standard_focus
  *
  * @author ruoyi
- * @date 2026-05-09
+ * @date 2026-06-17
  */
 @Data
 @EqualsAndHashCode(callSuper = true)
-@AutoMapper(target = ReviewStandardRule.class, reverseConvertGenerate = false)
-public class ReviewStandardRuleBo extends BaseEntity {
+@AutoMapper(target = ReviewStandardFocus.class, reverseConvertGenerate = false)
+public class ReviewStandardFocusBo extends BaseEntity {
 
     /**
      * 主键ID
@@ -28,49 +28,24 @@ public class ReviewStandardRuleBo extends BaseEntity {
     private Long id;
 
     /**
-     * 标准ID
+     * 所属标准ID
      */
     @NotNull(message = "标准ID不能为空", groups = {AddGroup.class, EditGroup.class})
     private Long standardId;
 
     /**
-     * 规则内容
+     * 关注要点
      */
-    @NotBlank(message = "规则内容不能为空", groups = {AddGroup.class, EditGroup.class})
-    private String content;
+    @NotBlank(message = "关注要点不能为空", groups = {AddGroup.class, EditGroup.class})
+    private String keyword;
 
     /**
-     * 规则分类
-     */
-    private String category;
-
-    /**
-     * 严重程度
-     */
-    private String severity;
-
-    /**
-     * 检查字段
-     */
-    private String checkField;
-
-    /**
-     * 检查方法
-     */
-    private String checkMethod;
-
-    /**
-     * 权重
-     */
-    private Integer weight;
-
-    /**
-     * 排序顺序
+     * 排序
      */
     private Integer sortOrder;
 
     /**
-     * 状态
+     * 状态（0=启用 1=停用）
      */
     private String status;
 
