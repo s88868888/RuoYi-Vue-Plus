@@ -117,19 +117,25 @@ public final class SearchablePdfBuilder {
     private static void writeInvisibleTextLayer(PDDocument doc, PDPage page,
                                                 byte[] pngBytes, OcrPageResult ocrResult,
                                                 PDType0Font font) throws IOException {
-        // PDF 用户坐标(point)
-        PDRectangle box = page.getMediaBox();
+        // PDFRenderer 渲染给 OCR 的是页面可见区域，坐标写回时也要用 CropBox。
+        PDRectangle box = page.getCropBox();
         float pageW = box.getWidth();
         float pageH = box.getHeight();
+        float originX = box.getLowerLeftX();
+        float originY = box.getLowerLeftY();
 
-        // OCR 输入图实际尺寸(像素)
-        int imgW = ocrResult.getImageWidth();
-        int imgH = ocrResult.getImageHeight();
+        // 坐标应映射回实际送给 OCR 的渲染 PNG 尺寸。
+        int[] renderedWh = readPngSize(pngBytes);
+        int imgW = renderedWh[0];
+        int imgH = renderedWh[1];
+        int ocrImgW = ocrResult.getImageWidth();
+        int ocrImgH = ocrResult.getImageHeight();
         if (imgW <= 0 || imgH <= 0) {
-            // 兜底:从 PNG 字节直接读
-            int[] wh = readPngSize(pngBytes);
-            imgW = wh[0];
-            imgH = wh[1];
+            imgW = ocrImgW;
+            imgH = ocrImgH;
+        } else if (ocrImgW > 0 && ocrImgH > 0 && (ocrImgW != imgW || ocrImgH != imgH)) {
+            log.warn("[SearchablePdfBuilder] OCR 返回图尺寸({}x{})与渲染 PNG 尺寸({}x{})不一致,按渲染 PNG 尺寸写回坐标",
+                ocrImgW, ocrImgH, imgW, imgH);
         }
         if (imgW <= 0 || imgH <= 0) {
             log.warn("无法获得渲染图尺寸,本页跳过");
@@ -138,6 +144,8 @@ public final class SearchablePdfBuilder {
         // 像素 → PDF point 缩放比例(直接用图与页面比,自动包含 DPI 偏差)
         float sx = pageW / (float) imgW;
         float sy = pageH / (float) imgH;
+        log.info("[SearchablePdfBuilder] 坐标映射: cropBox={}x{} origin=({},{}), image={}x{}, scale=({}, {})",
+            pageW, pageH, originX, originY, imgW, imgH, sx, sy);
 
         try (PDPageContentStream cs = new PDPageContentStream(
                 doc, page, AppendMode.APPEND, true, true)) {
@@ -145,7 +153,7 @@ public final class SearchablePdfBuilder {
             cs.setRenderingMode(RenderingMode.NEITHER); // mode 3:不可见(可选可搜)
 
             for (OcrTextBlock blk : ocrResult.getBlocks()) {
-                writeOneBlock(cs, font, blk, sx, sy, pageH);
+                writeOneBlock(cs, font, blk, sx, sy, pageH, originX, originY);
             }
             cs.endText();
         }
@@ -156,7 +164,8 @@ public final class SearchablePdfBuilder {
      * horizontalScaling 调整使字符总宽 ≈ poly 宽度。
      */
     private static void writeOneBlock(PDPageContentStream cs, PDType0Font font,
-                                      OcrTextBlock blk, float sx, float sy, float pageH)
+                                      OcrTextBlock blk, float sx, float sy, float pageH,
+                                      float originX, float originY)
             throws IOException {
         if (blk.getText() == null || blk.getText().isBlank()) return;
         if (blk.getPoly() == null || blk.getPoly().size() < 4) return;
@@ -194,8 +203,8 @@ public final class SearchablePdfBuilder {
 
         // PDF 坐标:Y 翻转(box[1]是顶部像素,PDF 原点在左下)。
         // baseline 在 bbox 底部 → pdfY = pageH - (pxY + pxH) * sy
-        float pdfX = pxX * sx;
-        float pdfY = pageH - (pxY + pxH) * sy;
+        float pdfX = originX + pxX * sx;
+        float pdfY = originY + pageH - (pxY + pxH) * sy;
 
         cs.setFont(font, fontSize);
         cs.setHorizontalScaling(hScale);

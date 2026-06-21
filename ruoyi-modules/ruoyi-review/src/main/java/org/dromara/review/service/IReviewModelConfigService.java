@@ -43,6 +43,12 @@ public interface IReviewModelConfigService {
     AiModelConfigDto getDefaultByPurpose(String purpose);
 
     /**
+     * 取指定用途 + provider 下的启用配置，找不到返回 null。
+     * 用于 searchable PDF 这种必须依赖特定 provider 能力的链路。
+     */
+    AiModelConfigDto getDefaultByPurposeAndProvider(String purpose, String provider);
+
+    /**
      * 测试连接（不落库）。
      * - chat 通道：发一句最简短 prompt（"ping"），看模型是否返回内容
      * - ocr 通道（paddleocr）：GET /health 或最小 1x1 PNG 跑一次

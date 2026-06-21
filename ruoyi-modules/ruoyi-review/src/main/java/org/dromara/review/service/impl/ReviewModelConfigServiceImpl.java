@@ -130,6 +130,19 @@ public class ReviewModelConfigServiceImpl implements IReviewModelConfigService {
         return c == null ? null : toDto(c);
     }
 
+    @Override
+    public AiModelConfigDto getDefaultByPurposeAndProvider(String purpose, String provider) {
+        if (StringUtils.isBlank(purpose) || StringUtils.isBlank(provider)) return null;
+        LambdaQueryWrapper<ReviewModelConfig> lqw = Wrappers.<ReviewModelConfig>lambdaQuery()
+            .eq(ReviewModelConfig::getPurpose, purpose)
+            .eq(ReviewModelConfig::getProvider, provider)
+            .eq(ReviewModelConfig::getEnabled, "1")
+            .orderByAsc(ReviewModelConfig::getId)
+            .last("LIMIT 1");
+        ReviewModelConfig c = baseMapper.selectOne(lqw);
+        return c == null ? null : toDto(c);
+    }
+
     private AiModelConfigDto toDto(ReviewModelConfig c) {
         Map<String, Object> opts = null;
         if (StringUtils.isNotBlank(c.getExtraOptions())) {

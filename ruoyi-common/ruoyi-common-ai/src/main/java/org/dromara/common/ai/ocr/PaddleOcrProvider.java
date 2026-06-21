@@ -127,6 +127,11 @@ public class PaddleOcrProvider implements OcrProvider {
         body.put("useDocOrientationClassify", readBool(p.opts, "useDocOrientationClassify", false));
         body.put("useDocUnwarping", readBool(p.opts, "useDocUnwarping", true));
         body.put("useTextlineOrientation", readBool(p.opts, "useTextlineOrientation", false));
+        log.info("[PaddleOcrProvider] 请求参数: url={}, timeoutMs={}, confidenceThreshold={}, useDocOrientationClassify={}, useDocUnwarping={}, useTextlineOrientation={}",
+            p.url, p.timeoutMs, p.minConf,
+            body.get("useDocOrientationClassify"),
+            body.get("useDocUnwarping"),
+            body.get("useTextlineOrientation"));
         HttpHeaders headers = new HttpHeaders();
         headers.setContentType(MediaType.APPLICATION_JSON);
         try {

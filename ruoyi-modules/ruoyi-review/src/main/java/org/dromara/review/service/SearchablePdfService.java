@@ -2,6 +2,7 @@ package org.dromara.review.service;
 
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.dromara.common.ai.dto.AiModelConfigDto;
 import org.dromara.common.ai.ocr.OcrProvider;
 import org.dromara.common.ai.ocr.PaddleOcrProvider;
 import org.dromara.common.ai.util.PdfTextExtractor;
@@ -13,7 +14,9 @@ import java.io.File;
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.StandardCopyOption;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 
 /**
  * Searchable PDF 生成服务
@@ -29,6 +32,7 @@ import java.util.List;
 public class SearchablePdfService {
 
     private final List<OcrProvider> providers;
+    private final IReviewModelConfigService modelConfigService;
 
     /**
      * 上传 PDF,返回处理后的 searchable PDF 字节数组。
@@ -50,11 +54,48 @@ public class SearchablePdfService {
                 .filter(p -> PaddleOcrProvider.NAME.equalsIgnoreCase(p.getName()))
                 .findFirst()
                 .orElseThrow(() -> new IOException("未找到 PaddleOcrProvider,无法构建 searchable PDF"));
-            byte[] out = SearchablePdfBuilder.build(tmp, provider);
+            AiModelConfigDto ocrConfig = resolvePaddleOcrConfig();
+            byte[] out = SearchablePdfBuilder.build(tmp, provider, ocrConfig);
             return new BuildResult(false, out);
         } finally {
             try { Files.deleteIfExists(tmp.toPath()); } catch (Exception ignore) {}
         }
+    }
+
+    private AiModelConfigDto resolvePaddleOcrConfig() {
+        try {
+            AiModelConfigDto config = modelConfigService.getDefaultByPurposeAndProvider("ocr", PaddleOcrProvider.NAME);
+            if (config == null) {
+                log.info("[SearchablePdfService] 未找到启用的 PaddleOCR 模型配置,使用 yml 连接参数 + searchable PDF 坐标安全选项");
+                return searchablePdfFallbackConfig();
+            }
+            log.info("[SearchablePdfService] 使用 OCR 模型配置生成 searchable PDF: id={}, code={}, provider={}, baseUrl={}, extraOptions={}",
+                config.getId(), config.getCode(), config.getProvider(), config.getBaseUrl(), config.getExtraOptions());
+            config.setExtraOptions(searchablePdfOptions(config.getExtraOptions()));
+            return config;
+        } catch (Exception e) {
+            log.warn("[SearchablePdfService] 加载 OCR 模型配置失败,使用 yml 连接参数 + searchable PDF 坐标安全选项: {}", e.getMessage());
+            return searchablePdfFallbackConfig();
+        }
+    }
+
+    private AiModelConfigDto searchablePdfFallbackConfig() {
+        return AiModelConfigDto.builder()
+            .provider(PaddleOcrProvider.NAME)
+            .extraOptions(searchablePdfOptions(null))
+            .build();
+    }
+
+    private Map<String, Object> searchablePdfOptions(Map<String, Object> source) {
+        Map<String, Object> options = new LinkedHashMap<>();
+        if (source != null) {
+            options.putAll(source);
+        }
+        // searchable PDF 坐标写回要求 OCR 返回的坐标必须和输入渲染图一致。
+        options.put("useDocOrientationClassify", false);
+        options.put("useDocUnwarping", false);
+        options.put("useTextlineOrientation", false);
+        return options;
     }
 
     /** 探测 PDF 是否已有文字层(打印版),不做 OCR */
