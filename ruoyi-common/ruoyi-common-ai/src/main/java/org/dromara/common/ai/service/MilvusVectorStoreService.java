@@ -265,6 +265,12 @@ public class MilvusVectorStoreService {
     public List<VectorSearchResult> search(String collectionName, String queryText,
                                           String tenantId, Long companyId,
                                           String docType, int topK) {
+        // 集合不存在（知识库从未同步）属正常情况：直接返回空，避免发起必然失败的 search RPC
+        // 触发 Milvus SDK 打整段 ServerException 堆栈，也省掉一次无意义的 embedding 计算
+        if (!collectionExists(collectionName)) {
+            log.debug("[Milvus] 集合不存在，跳过检索: {}", collectionName);
+            return Collections.emptyList();
+        }
         try {
             // 生成查询向量
             float[] queryVector = generateEmbedding(queryText);
@@ -384,6 +390,21 @@ public class MilvusVectorStoreService {
         } catch (Exception e) {
             log.error("搜索向量数据异常", e);
             return Collections.emptyList();
+        }
+    }
+
+    /**
+     * 集合是否存在。hasCollection 是轻量元数据查询，不存在时返回 false 而非抛异常，
+     * 可在 search 前做前置判断，避免对未同步知识库发起会触发 SDK 堆栈日志的 search 调用。
+     */
+    public boolean collectionExists(String collectionName) {
+        try {
+            R<Boolean> has = milvusClient.hasCollection(
+                HasCollectionParam.newBuilder().withCollectionName(collectionName).build());
+            return has.getData() != null && has.getData();
+        } catch (Exception e) {
+            log.debug("[Milvus] 检查集合是否存在失败: {}, {}", collectionName, e.getMessage());
+            return false;
         }
     }
 

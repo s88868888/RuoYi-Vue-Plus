@@ -1,6 +1,7 @@
 package org.dromara.review.controller;
 
 import cn.dev33.satoken.annotation.SaCheckPermission;
+import cn.dev33.satoken.annotation.SaIgnore;
 import jakarta.servlet.http.HttpServletResponse;
 import jakarta.validation.constraints.NotEmpty;
 import jakarta.validation.constraints.NotNull;
@@ -27,11 +28,14 @@ import org.dromara.review.service.IReviewStandardFocusService;
 import org.dromara.review.service.IReviewStandardRuleService;
 import org.dromara.review.service.IReviewStandardService;
 import org.dromara.review.service.ReviewStandardParseService;
+import org.dromara.system.domain.vo.SysDictDataVo;
+import org.dromara.system.service.ISysDictTypeService;
 import org.springframework.validation.annotation.Validated;
 import org.springframework.web.bind.annotation.*;
 import org.springframework.web.multipart.MultipartFile;
 
 import java.io.IOException;
+import java.util.ArrayList;
 import java.util.List;
 
 /**
@@ -49,6 +53,7 @@ public class ReviewStandardController extends BaseController {
     private final IReviewStandardRuleService reviewStandardRuleService;
     private final IReviewStandardFocusService reviewStandardFocusService;
     private final ReviewStandardParseService reviewStandardParseService;
+    private final ISysDictTypeService dictTypeService;
 
     /**
      * 分页查询标准列表
@@ -56,6 +61,16 @@ public class ReviewStandardController extends BaseController {
     @GetMapping("/list")
     public TableDataInfo<ReviewStandardVo> list(ReviewStandardBo bo, PageQuery pageQuery) {
         return reviewStandardService.queryPageList(bo, pageQuery);
+    }
+
+    /**
+     * Rule category dictionary for the city-renewal proxy.
+     */
+    @SaIgnore
+    @GetMapping("/rule/categories")
+    public R<List<SysDictDataVo>> ruleCategories() {
+        List<SysDictDataVo> data = dictTypeService.selectDictDataByType("review_rule_category");
+        return R.ok(data == null ? new ArrayList<>() : data);
     }
 
     /**
