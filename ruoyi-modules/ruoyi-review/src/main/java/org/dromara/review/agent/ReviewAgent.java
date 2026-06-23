@@ -36,9 +36,11 @@ import java.io.File;
 import java.io.FileInputStream;
 import java.nio.file.Path;
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ExecutorService;
@@ -1505,6 +1507,15 @@ public class ReviewAgent {
 
         JSONArray itemArr = new JSONArray();
         if (items != null) {
+            // 规则原文/检查方法回传：按 ruleId 批量查规则，避免逐条查库。供外部系统展示「规则说明」。
+            Set<Long> ruleIds = items.stream().map(ReviewResultItem::getRuleId)
+                .filter(Objects::nonNull).collect(Collectors.toSet());
+            Map<Long, ReviewStandardRule> ruleMap = new HashMap<>();
+            if (!ruleIds.isEmpty()) {
+                for (ReviewStandardRule r : standardRuleMapper.selectByIds(ruleIds)) {
+                    ruleMap.put(r.getId(), r);
+                }
+            }
             for (ReviewResultItem it : items) {
                 JSONObject o = new JSONObject();
                 o.put("fieldName", it.getFieldName());
@@ -1517,6 +1528,12 @@ public class ReviewAgent {
                 o.put("location", it.getLocation());
                 o.put("description", it.getDescription());
                 o.put("suggestion", it.getSuggestion());
+                // 规则说明：规则原文 + 检查方法（按命中的 ruleId 回填，未命中规则的项留空）
+                ReviewStandardRule rule = it.getRuleId() == null ? null : ruleMap.get(it.getRuleId());
+                if (rule != null) {
+                    o.put("ruleContent", rule.getContent());
+                    o.put("checkMethod", rule.getCheckMethod());
+                }
                 itemArr.add(o);
             }
         }

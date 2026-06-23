@@ -44,22 +44,41 @@ public class SearchablePdfService {
             try (var in = pdf.getInputStream()) {
                 Files.copy(in, tmp.toPath(), StandardCopyOption.REPLACE_EXISTING);
             }
-            boolean hasText = PdfTextExtractor.hasTextLayer(tmp);
-            if (hasText) {
-                log.info("[SearchablePdfService] {} 已有文字层,直接返回原文件", pdf.getOriginalFilename());
-                return new BuildResult(true, Files.readAllBytes(tmp.toPath()));
-            }
-            // 强制用 paddleocr:只有它实现了 ocrStructured(返回坐标)
-            OcrProvider provider = providers.stream()
-                .filter(p -> PaddleOcrProvider.NAME.equalsIgnoreCase(p.getName()))
-                .findFirst()
-                .orElseThrow(() -> new IOException("未找到 PaddleOcrProvider,无法构建 searchable PDF"));
-            AiModelConfigDto ocrConfig = resolvePaddleOcrConfig();
-            byte[] out = SearchablePdfBuilder.build(tmp, provider, ocrConfig);
-            return new BuildResult(false, out);
+            return buildFromTempFile(tmp, pdf.getOriginalFilename());
         } finally {
             try { Files.deleteIfExists(tmp.toPath()); } catch (Exception ignore) {}
         }
+    }
+
+    /**
+     * 直接对字节流构建 searchable PDF（OSS 已存文件走这条，无需 MultipartFile 包装）。
+     * 已有文字层直接返回原字节。
+     */
+    public BuildResult buildFromBytes(byte[] pdfBytes, String filename) throws IOException {
+        File tmp = Files.createTempFile("ocr-src-", ".pdf").toFile();
+        try {
+            Files.write(tmp.toPath(), pdfBytes);
+            return buildFromTempFile(tmp, filename);
+        } finally {
+            try { Files.deleteIfExists(tmp.toPath()); } catch (Exception ignore) {}
+        }
+    }
+
+    /** 共用：对临时 PDF 文件做文字层探测 + 必要时 OCR 生成 searchable PDF */
+    private BuildResult buildFromTempFile(File tmp, String filename) throws IOException {
+        boolean hasText = PdfTextExtractor.hasTextLayer(tmp);
+        if (hasText) {
+            log.info("[SearchablePdfService] {} 已有文字层,直接返回原文件", filename);
+            return new BuildResult(true, Files.readAllBytes(tmp.toPath()));
+        }
+        // 强制用 paddleocr:只有它实现了 ocrStructured(返回坐标)
+        OcrProvider provider = providers.stream()
+            .filter(p -> PaddleOcrProvider.NAME.equalsIgnoreCase(p.getName()))
+            .findFirst()
+            .orElseThrow(() -> new IOException("未找到 PaddleOcrProvider,无法构建 searchable PDF"));
+        AiModelConfigDto ocrConfig = resolvePaddleOcrConfig();
+        byte[] out = SearchablePdfBuilder.build(tmp, provider, ocrConfig);
+        return new BuildResult(false, out);
     }
 
     private AiModelConfigDto resolvePaddleOcrConfig() {

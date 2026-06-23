@@ -158,4 +158,9 @@ public class ReviewTask extends TenantEntity {
      */
     private String callbackUrl;
 
+    /**
+     * 附件对比差异清单批注（JSON：签名→批注内容，COMPARE 专用）
+     */
+    private String noteData;
+
 }

@@ -119,4 +119,9 @@ public class ReviewResultItem extends TenantEntity {
      */
     private String rawData;
 
+    /**
+     * 用户批注（前端清单可编辑并保存，导出批注时写入PDF）
+     */
+    private String note;
+
 }

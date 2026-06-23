@@ -106,6 +106,13 @@
             <version>5.2.5</version>
         </dependency>
 
+        <!-- aspose-words 社区版(luhuiguo,免费无水印): Word(doc/docx) → PDF，附件对比基准件为 Word 时转 PDF 供查看器字符级 diff -->
+        <dependency>
+            <groupId>com.luhuiguo</groupId>
+            <artifactId>aspose-words</artifactId>
+            <version>23.1</version>
+        </dependency>
+
     </dependencies>
 
 </project>

@@ -69,6 +69,16 @@ public class ReviewTaskFile extends TenantEntity {
     private String extractedText;
 
     /**
+     * OCR 后的可搜索PDF URL（扫描件用；打印件为空，查看器回退原文件）
+     */
+    private String searchableUrl;
+
+    /**
+     * OCR 状态 NONE=无需/非PDF SKIP=本就有文字层 PENDING/RUNNING/SUCCESS/FAIL
+     */
+    private String ocrStatus;
+
+    /**
      * 排序顺序
      */
     private Integer sortOrder;
