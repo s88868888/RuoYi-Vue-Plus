@@ -96,9 +96,10 @@ public class ReviewGraphAgent {
             .addEdge(ReviewStateKeys.NODE_INITIAL_REVIEW, ReviewStateKeys.NODE_MISJUDGE_CROSSCHECK)
             .addEdge(ReviewStateKeys.NODE_MISJUDGE_CROSSCHECK, ReviewStateKeys.NODE_SELF_VERIFY)
             .addConditionalEdges(ReviewStateKeys.NODE_SELF_VERIFY,
-                edge_async(state -> ReviewGraphSupport.getContext(state) != null
-                    ? state.<String>value(ReviewStateKeys.NEXT).orElse(ReviewStateKeys.ROUTE_FINALIZE)
-                    : ReviewStateKeys.ROUTE_FINALIZE),
+                edge_async(state -> {
+                    ReviewGraphSupport.getContext(state);
+                    return state.<String>value(ReviewStateKeys.NEXT).orElse(ReviewStateKeys.ROUTE_FINALIZE);
+                }),
                 verifyRoutes)
             .addEdge(ReviewStateKeys.NODE_FINALIZE, END);
 

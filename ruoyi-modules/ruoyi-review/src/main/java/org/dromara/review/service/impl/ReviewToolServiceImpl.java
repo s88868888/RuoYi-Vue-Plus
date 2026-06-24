@@ -73,7 +73,6 @@ public class ReviewToolServiceImpl implements IReviewToolService {
         ReviewToolResultVo vo = new ReviewToolResultVo();
         vo.setId(String.valueOf(task.getId()));
         vo.setReviewTaskId(task.getId());
-        vo.setReviewtype(toReviewType(task.getTaskType()));
         vo.setStatus(normalizeStatus(task.getStatus()));
         vo.setPassStatus(task.getPassStatus());
         vo.setScore(task.getScore());
@@ -93,10 +92,13 @@ public class ReviewToolServiceImpl implements IReviewToolService {
             Wrappers.<ReviewTaskFile>lambdaQuery()
                 .eq(ReviewTaskFile::getTaskId, taskId)
                 .orderByAsc(ReviewTaskFile::getSortOrder));
+        // 视图类型以文件数为准：taskType 同时承担"提示词模板类型"，可能是 Document_Review 等自定义值，
+        // 仅凭关键字判定会落空 → 双文件=对比，单文件=内容审查。
+        vo.setReviewtype(toReviewType(task.getTaskType(), files.size()));
         boolean isCompare = "COMPARE".equals(vo.getReviewtype());
         ReviewTaskFile signFile;
         if (isCompare) {
-            ReviewTaskFile baseFile = files.size() >= 1 ? files.get(0) : null;
+            ReviewTaskFile baseFile = !files.isEmpty() ? files.get(0) : null;
             signFile = files.size() >= 2 ? files.get(1) : null;
             if (baseFile != null) {
                 vo.setPrintPdfUrl(fileUrl(baseFile));
@@ -104,7 +106,7 @@ public class ReviewToolServiceImpl implements IReviewToolService {
             }
         } else {
             // AUDIT：单文档即 B 侧
-            signFile = files.size() >= 1 ? files.get(0) : null;
+            signFile = !files.isEmpty() ? files.get(0) : null;
         }
         if (signFile != null) {
             vo.setSignFileUrl(fileUrl(signFile));
@@ -307,20 +309,23 @@ public class ReviewToolServiceImpl implements IReviewToolService {
 
     // ===================== helpers =====================
 
-    /** 引擎 taskType → 查看器审核类型 COMPARE/AUDIT */
-    private String toReviewType(String taskType) {
-        if (taskType == null) {
-            return "AUDIT";
+    /**
+     * 引擎 taskType → 查看器审核类型 COMPARE/AUDIT。
+     * taskType 同时是提示词模板类型，可能是 BCXY_COMPARE / CONTENT_AUDIT / Document_Review 等任意值，
+     * 故先按关键字判定，命不中再以文件数兜底：双文件=对比，单/零文件=内容审查。
+     */
+    private String toReviewType(String taskType, int fileCount) {
+        if (taskType != null) {
+            String t = taskType.toUpperCase();
+            if (t.contains("COMPARE")) {
+                return "COMPARE";
+            }
+            if (t.contains("AUDIT")) {
+                return "AUDIT";
+            }
         }
-        String t = taskType.toUpperCase();
-        if (t.contains("AUDIT")) {
-            return "AUDIT";
-        }
-        if (t.contains("COMPARE")) {
-            return "COMPARE";
-        }
-        // 其余按双文档对比兜底
-        return "COMPARE";
+        // 关键字未命中：按文件数判定（对比必有基准+对比两份，内容审查只有一份）
+        return fileCount >= 2 ? "COMPARE" : "AUDIT";
     }
 
     /** 引擎状态 pending/reviewing/completed/failed → 城更口径 PENDING/RUNNING/SUCCESS/FAIL */
@@ -328,17 +333,12 @@ public class ReviewToolServiceImpl implements IReviewToolService {
         if (status == null) {
             return "PENDING";
         }
-        switch (status.toLowerCase()) {
-            case "completed":
-                return "SUCCESS";
-            case "failed":
-                return "FAIL";
-            case "reviewing":
-                return "RUNNING";
-            case "pending":
-            default:
-                return "PENDING";
-        }
+        return switch (status.toLowerCase()) {
+            case "completed" -> "SUCCESS";
+            case "failed" -> "FAIL";
+            case "reviewing" -> "RUNNING";
+            default -> "PENDING";
+        };
     }
 
     /** 文件可访问 URL：优先 filePath（外部URL），否则用文件名（前端拼 OSS 前缀） */
