@@ -327,6 +327,17 @@ public class ReviewAgent {
         if (basePrompt.contains("{focus_categories}")) {
             basePrompt = basePrompt.replace("{focus_categories}", "（无）");
         }
+        // 兜底：模板未引用 {output_format} 占位符（system/user 提示词都没写）时，schema 不会被注入，
+        // AI 会自由发挥返回与解析器期望(items)不符的结构（如 audit_result）→ 异常清单静默为空、零报错难排查。
+        // 此处把 output_format 自动追加到主体末尾，并 warn 提示模板配置缺陷，建议补全模板。
+        String userTpl = template.getUserPrompt() != null ? template.getUserPrompt() : "";
+        boolean outputFormatReferenced = template.getSystemPrompt().contains("{output_format}")
+            || userTpl.contains("{output_format}");
+        if (!outputFormatReferenced && !outputFormat.isBlank()) {
+            basePrompt = basePrompt + "\n\n请严格按以下JSON格式返回：\n" + outputFormat;
+            log.warn("[ReviewAgent] 模板(id={}, type={}) 未引用 output_format 占位符，已自动追加输出格式 schema 兜底，建议补全模板配置",
+                template.getId(), template.getType());
+        }
         return basePrompt + focusInstruction;
     }
 
