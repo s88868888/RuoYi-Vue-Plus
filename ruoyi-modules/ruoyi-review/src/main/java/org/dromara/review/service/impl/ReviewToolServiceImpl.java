@@ -81,6 +81,7 @@ public class ReviewToolServiceImpl implements IReviewToolService {
         vo.setInfoCount(task.getInfoCount());
         vo.setAiSummary(task.getAiSummary());
         vo.setNoteData(task.getNoteData());
+        vo.setRedactData(task.getRedactData());
         vo.setCreatetime(task.getCreateTime());
         vo.setUpdatetime(task.getUpdateTime());
         if ("FAIL".equals(vo.getStatus())) {
@@ -191,6 +192,14 @@ public class ReviewToolServiceImpl implements IReviewToolService {
                 .eq(StringUtils.isNotBlank(fieldName), ReviewResultItem::getFieldName, fieldName)
                 .set(ReviewResultItem::getNote, note);
         resultItemMapper.update(null, luw);
+    }
+
+    @Override
+    public void saveRedactData(Long taskId, String redactData) {
+        ReviewTask patch = new ReviewTask();
+        patch.setId(taskId);
+        patch.setRedactData(redactData);
+        taskMapper.updateById(patch);
     }
 
     @Override

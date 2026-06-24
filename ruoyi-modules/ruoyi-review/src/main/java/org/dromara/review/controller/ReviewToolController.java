@@ -68,6 +68,20 @@ public class ReviewToolController extends BaseController {
     }
 
     /**
+     * 保存内容审查脱敏手动框选数据（AUDIT）。
+     */
+    @Log(title = "工具-脱敏框选", businessType = BusinessType.UPDATE)
+    @PostMapping("/redactData")
+    public R<Void> saveRedactData(@RequestBody Map<String, String> body) {
+        String taskId = body.get("taskId");
+        if (taskId == null || taskId.isBlank()) {
+            return R.fail("taskId 不能为空");
+        }
+        reviewToolService.saveRedactData(Long.valueOf(taskId), body.get("redactData"));
+        return R.ok();
+    }
+
+    /**
      * 查询附件 OCR 状态（查看器轮询；状态为空的 PDF 会懒触发）。
      */
     @GetMapping("/ocr/status")

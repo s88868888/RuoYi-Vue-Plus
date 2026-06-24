@@ -76,6 +76,9 @@ public class ReviewToolResultVo implements Serializable {
     /** 附件对比差异清单批注（JSON：签名→批注内容，COMPARE 专用） */
     private String noteData;
 
+    /** 脱敏手动框选数据（JSON，内容审查专用） */
+    private String redactData;
+
     /** 问题明细列表 */
     private List<IssueItem> issues;
 

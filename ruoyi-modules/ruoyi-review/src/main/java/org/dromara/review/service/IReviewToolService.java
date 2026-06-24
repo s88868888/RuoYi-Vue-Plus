@@ -41,6 +41,14 @@ public interface IReviewToolService {
     void saveIssueNote(Long taskId, String fieldName, String note);
 
     /**
+     * 保存内容审查脱敏手动框选数据。
+     *
+     * @param taskId     任务ID
+     * @param redactData 手动脱敏框 JSON
+     */
+    void saveRedactData(Long taskId, String redactData);
+
+    /**
      * 按 ossId 触发某附件的 OCR（查看器自愈用）。
      *
      * @param ossId OSS文件ID

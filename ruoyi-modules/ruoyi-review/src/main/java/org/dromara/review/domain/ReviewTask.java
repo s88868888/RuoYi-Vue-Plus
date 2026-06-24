@@ -163,4 +163,9 @@ public class ReviewTask extends TenantEntity {
      */
     private String noteData;
 
+    /**
+     * 脱敏手动框选数据（JSON，内容审查专用）
+     */
+    private String redactData;
+
 }
