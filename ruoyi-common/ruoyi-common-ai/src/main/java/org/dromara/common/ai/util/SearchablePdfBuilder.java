@@ -73,7 +73,7 @@ public final class SearchablePdfBuilder {
         } catch (Exception e) {
             throw new IOException("渲染 PDF 页面失败: " + e.getMessage(), e);
         }
-        if (pageImages == null || pageImages.isEmpty()) {
+        if (pageImages.isEmpty()) {
             throw new IOException("PDF 没有可渲染的页面: " + sourcePdf.getName());
         }
 
