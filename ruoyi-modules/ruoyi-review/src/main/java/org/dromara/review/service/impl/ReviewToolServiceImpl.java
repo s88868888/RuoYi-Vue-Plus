@@ -247,17 +247,38 @@ public class ReviewToolServiceImpl implements IReviewToolService {
 
     @Override
     public List<ReviewStandardRule> getToolRules(Long taskId) {
-        List<Long> standardIds = taskStandardMapper.selectList(
-                Wrappers.<ReviewTaskStandard>lambdaQuery().eq(ReviewTaskStandard::getTaskId, taskId))
-            .stream().map(ReviewTaskStandard::getStandardId).distinct().collect(Collectors.toList());
-        if (CollUtil.isEmpty(standardIds)) {
-            return new ArrayList<>();
-        }
-        return standardRuleMapper.selectList(
-            Wrappers.<ReviewStandardRule>lambdaQuery()
-                .in(ReviewStandardRule::getStandardId, standardIds)
-                .ne(ReviewStandardRule::getStatus, "1")
-                .orderByAsc(ReviewStandardRule::getSortOrder));
+        // 规则/标准是「全局基础数据」（库里统一 000000 租户），但当前登录用户可能处在业务租户下；
+        // 不忽略租户时，MyBatis-Plus 会给 standard_rule 查询自动加 tenant_id=当前租户 → 查空。
+        // 故整段用 TenantHelper.ignore 包裹，与「异常清单」能取到规则文案的行为对齐。
+        return TenantHelper.ignore(() -> {
+            // 主路径：任务关联标准 → 该标准下的启用规则
+            List<Long> standardIds = taskStandardMapper.selectList(
+                    Wrappers.<ReviewTaskStandard>lambdaQuery().eq(ReviewTaskStandard::getTaskId, taskId))
+                .stream().map(ReviewTaskStandard::getStandardId).distinct().collect(Collectors.toList());
+            if (CollUtil.isNotEmpty(standardIds)) {
+                List<ReviewStandardRule> rules = standardRuleMapper.selectList(
+                    Wrappers.<ReviewStandardRule>lambdaQuery()
+                        .in(ReviewStandardRule::getStandardId, standardIds)
+                        .ne(ReviewStandardRule::getStatus, "1")
+                        .orderByAsc(ReviewStandardRule::getSortOrder));
+                if (CollUtil.isNotEmpty(rules)) {
+                    return rules;
+                }
+            }
+            // 兜底：任务-标准关联缺失/不一致时，从本次审核结果实际命中的 rule_id 反查规则。
+            // 与异常清单同源（getToolResult 也用 result_item.rule_id enrich），保证「清单有规则文案→查看规则就有」。
+            Set<Long> ruleIds = resultItemMapper.selectList(
+                    Wrappers.<ReviewResultItem>lambdaQuery().eq(ReviewResultItem::getTaskId, taskId))
+                .stream().map(ReviewResultItem::getRuleId).filter(Objects::nonNull)
+                .collect(Collectors.toCollection(LinkedHashSet::new));
+            if (CollUtil.isEmpty(ruleIds)) {
+                return new ArrayList<>();
+            }
+            List<ReviewStandardRule> byResult = standardRuleMapper.selectByIds(ruleIds);
+            byResult.sort(java.util.Comparator.comparing(
+                r -> r.getSortOrder() == null ? Integer.MAX_VALUE : r.getSortOrder()));
+            return byResult;
+        });
     }
 
     @Override
