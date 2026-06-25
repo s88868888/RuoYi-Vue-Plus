@@ -1,25 +1,31 @@
 package org.dromara.common.ai.util;
 
 import lombok.extern.slf4j.Slf4j;
+import org.apache.fontbox.ttf.TTFParser;
 import org.apache.fontbox.ttf.TrueTypeCollection;
 import org.apache.fontbox.ttf.TrueTypeFont;
+import org.apache.pdfbox.io.RandomAccessReadBufferedFile;
 import org.apache.pdfbox.pdmodel.PDDocument;
 import org.apache.pdfbox.pdmodel.font.PDType0Font;
 
 import java.io.File;
 import java.io.IOException;
 import java.io.InputStream;
+import java.util.ArrayDeque;
+import java.util.Deque;
 
 /**
  * SearchablePdfBuilder 用的中文字体加载器
  * <p>
  * PDFBox 不内置 CJK,需要从系统/资源加载字体。策略:
  * 1. 先找 classpath 资源 {@code /fonts/cjk-default.ttf}(项目可手动放)
- * 2. 找操作系统字体目录的常见中文字体
+ * 2. 找操作系统字体目录的常见中文字体(按已知绝对路径)
  *    - Linux: 文泉驿/思源黑体
  *    - Windows: 微软雅黑(msyh.ttc 是 TTC 集合,需要解出单字体)
  *    - macOS: PingFang
- * 3. 都找不到则抛异常,不可降级到 Latin 字体——会丢失全部中文
+ * 3. 兜底:递归扫描 {@link #SCAN_DIRS} 字体目录,挑第一个真正覆盖中文的 ttf/ttc
+ *    (Alpine/musl、各发行版字体落盘路径不一致,硬编码绝对路径常常落空,靠扫描兜住)
+ * 4. 都找不到则抛异常,不可降级到 Latin 字体——会丢失全部中文
  * <p>
  * 字体只用于 PDF 文字层(不可见 rendering mode 3),不显示给用户看,选字符集覆盖最广的即可。
  *
@@ -69,6 +75,16 @@ public final class CjkFontLoader {
     /** classpath 资源路径(如果项目手动放了字体) */
     private static final String CLASSPATH_FONT = "/fonts/cjk-default.ttf";
 
+    /** 兜底扫描的字体根目录(覆盖各发行版 / Alpine / 用户字体) */
+    private static final String[] SCAN_DIRS = {
+        "/usr/share/fonts",
+        "/usr/local/share/fonts",
+        "/root/.fonts",
+    };
+
+    /** 扫描兜底命中的字体文件缓存,避免每次构建 PDF 都遍历磁盘 */
+    private static volatile File scannedFontFile;
+
     /**
      * 加载一个中文字体并嵌入到指定 PDDocument。
      * 第一次调用会做 IO,但字体本身在 PDF 内只嵌入一次(PDFBox 自动子集)。
@@ -105,8 +121,100 @@ public final class CjkFontLoader {
                 log.warn("[CjkFontLoader] 加载字体失败,尝试下一个: {} - {}", path, e.toString());
             }
         }
+        // 3. 兜底:递归扫描字体目录,找第一个真正覆盖中文的 ttf/ttc
+        //    解决 Alpine/各发行版字体落盘路径与 CANDIDATE_PATHS 不一致导致的找不到
+        PDType0Font scanned = loadFromScan(doc);
+        if (scanned != null) {
+            return scanned;
+        }
         throw new IOException("找不到可用的中文字体。请将 ttf 放到 classpath:/fonts/cjk-default.ttf, "
             + "或安装常见中文字体(微软雅黑/思源黑体/文泉驿)");
+    }
+
+    /**
+     * 递归扫描 {@link #SCAN_DIRS},挑第一个真正覆盖中文('中')的 ttf/ttc 嵌入。
+     * 命中后缓存文件路径,后续调用直接复用,不再遍历磁盘。
+     */
+    private static PDType0Font loadFromScan(PDDocument doc) {
+        File cached = scannedFontFile;
+        if (cached != null && cached.exists() && cached.canRead()) {
+            try {
+                PDType0Font font = loadCoveringFont(doc, cached);
+                if (font != null) return font;
+            } catch (Exception e) {
+                log.warn("[CjkFontLoader] 缓存字体加载失败,重新扫描: {} - {}", cached, e.toString());
+                scannedFontFile = null;
+            }
+        }
+        for (String root : SCAN_DIRS) {
+            File dir = new File(root);
+            if (!dir.isDirectory()) continue;
+            Deque<File> stack = new ArrayDeque<>();
+            stack.push(dir);
+            while (!stack.isEmpty()) {
+                File cur = stack.pop();
+                File[] children = cur.listFiles();
+                if (children == null) continue;
+                for (File child : children) {
+                    if (child.isDirectory()) {
+                        stack.push(child);
+                        continue;
+                    }
+                    String lower = child.getName().toLowerCase();
+                    // 只认 TrueType(.ttf / .ttc);.otf 多为 CFF,PDFBox 嵌入不稳,跳过
+                    if (!lower.endsWith(".ttf") && !lower.endsWith(".ttc")) continue;
+                    if (!child.canRead()) continue;
+                    try {
+                        PDType0Font font = loadCoveringFont(doc, child);
+                        if (font != null) {
+                            scannedFontFile = child;
+                            log.info("[CjkFontLoader] 扫描命中中文字体: {}", child.getAbsolutePath());
+                            return font;
+                        }
+                    } catch (Exception e) {
+                        log.debug("[CjkFontLoader] 扫描字体不可用,跳过: {} - {}", child, e.toString());
+                    }
+                }
+            }
+        }
+        return null;
+    }
+
+    /**
+     * 加载字体文件,但仅当它真正覆盖中文时才返回;否则返回 null(避免选到纯西文字体)。
+     */
+    private static PDType0Font loadCoveringFont(PDDocument doc, File f) throws IOException {
+        if (f.getName().toLowerCase().endsWith(".ttc")) {
+            try (TrueTypeCollection ttc = new TrueTypeCollection(f)) {
+                final TrueTypeFont[] holder = new TrueTypeFont[1];
+                ttc.processAllFonts(ttf -> {
+                    if (holder[0] == null && coversCjk(ttf)) {
+                        holder[0] = ttf;
+                    }
+                });
+                if (holder[0] != null) {
+                    return PDType0Font.load(doc, holder[0], true);
+                }
+            }
+            return null;
+        }
+        // 单 ttf:先用 fontbox 解析校验中文覆盖,再嵌入
+        try (RandomAccessReadBufferedFile raf = new RandomAccessReadBufferedFile(f)) {
+            TrueTypeFont ttf = new TTFParser().parse(raf);
+            if (!coversCjk(ttf)) {
+                return null;
+            }
+            return PDType0Font.load(doc, ttf, true);
+        }
+    }
+
+    /** 用 cmap 判断字体是否覆盖中文(取常用字 '中' U+4E2D 探测) */
+    private static boolean coversCjk(TrueTypeFont ttf) {
+        try {
+            return ttf.getUnicodeCmapLookup().getGlyphId('中') > 0;
+        } catch (Exception e) {
+            return false;
+        }
     }
 
     /**
