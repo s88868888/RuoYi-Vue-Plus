@@ -16,10 +16,13 @@ import org.dromara.review.domain.bo.ReviewTaskBo;
 import org.dromara.review.domain.vo.ReviewEngineCompareVo;
 import org.dromara.review.domain.vo.ReviewResultItemVo;
 import org.dromara.review.domain.vo.ReviewTaskVo;
+import org.dromara.review.service.IReviewProjectService;
 import org.dromara.review.service.IReviewTaskService;
 import org.dromara.review.service.ReviewEngineCompareService;
 import org.springframework.validation.annotation.Validated;
 import org.springframework.web.bind.annotation.*;
+import org.springframework.web.multipart.MultipartFile;
+import jakarta.servlet.http.HttpServletResponse;
 
 import java.util.List;
 import java.util.Map;
@@ -37,6 +40,7 @@ public class ReviewTaskController extends BaseController {
 
     private final IReviewTaskService reviewTaskService;
     private final ReviewEngineCompareService reviewEngineCompareService;
+    private final IReviewProjectService reviewProjectService;
 
     /**
      * 分页查询任务列表
@@ -141,5 +145,32 @@ public class ReviewTaskController extends BaseController {
     public R<List<ReviewEngineCompareVo>> compareEngines(
         @NotEmpty(message = "任务ID列表不能为空") @RequestBody List<Long> taskIds) {
         return R.ok(reviewEngineCompareService.compare(taskIds));
+    }
+
+    /**
+     * 导出选中任务为「工程包」zip（附件原件 + 审核结果/关注/规则快照/脱敏框，自包含可离线复看）。
+     *
+     * @param taskIds  勾选的任务ID列表
+     * @param response 直接写 zip 流
+     */
+    @SaCheckPermission("review:task:list")
+    @Log(title = "导出审核工程包", businessType = BusinessType.EXPORT)
+    @PostMapping("/export")
+    public void export(@NotEmpty(message = "请选择要导出的任务") @RequestBody List<Long> taskIds,
+                       HttpServletResponse response) {
+        reviewProjectService.exportProject(taskIds, response);
+    }
+
+    /**
+     * 导入工程包 zip，在当前库重新落库为全新任务（新 id、附件重传 OSS）。
+     *
+     * @param file 上传的工程包 zip
+     * @return 新建的任务ID列表
+     */
+    @SaCheckPermission("review:task:list")
+    @Log(title = "导入审核工程包", businessType = BusinessType.IMPORT)
+    @PostMapping(value = "/import", consumes = "multipart/form-data")
+    public R<List<Long>> importProject(@RequestPart("file") MultipartFile file) {
+        return R.ok("导入成功", reviewProjectService.importProject(file));
     }
 }
