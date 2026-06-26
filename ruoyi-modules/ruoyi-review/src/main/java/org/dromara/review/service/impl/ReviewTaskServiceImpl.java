@@ -61,7 +61,7 @@ import java.util.Map;
 public class ReviewTaskServiceImpl implements IReviewTaskService {
 
     private static final String SOURCE_TYPE_AI_TOOL = "AI_TOOL";
-    private static final String TASK_TYPE_BCXY_COMPARE = "BCXY_COMPARE";
+    private static final String TASK_TYPE_ATTACHMENT_COMPARE = "ATTACHMENT_COMPARE";
     private static final String TASK_TYPE_CONTENT_AUDIT = "CONTENT_AUDIT";
 
     private final ReviewTaskMapper baseMapper;
@@ -279,7 +279,7 @@ public class ReviewTaskServiceImpl implements IReviewTaskService {
         if (bo == null || !SOURCE_TYPE_AI_TOOL.equals(bo.getSourceType())) {
             return;
         }
-        if (TASK_TYPE_BCXY_COMPARE.equals(bo.getTaskType())) {
+        if (TASK_TYPE_ATTACHMENT_COMPARE.equals(bo.getTaskType())) {
             return;
         }
         if (!TASK_TYPE_CONTENT_AUDIT.equals(bo.getTaskType())) {

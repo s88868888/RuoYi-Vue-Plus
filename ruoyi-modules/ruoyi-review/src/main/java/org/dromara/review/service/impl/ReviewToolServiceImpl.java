@@ -341,7 +341,7 @@ public class ReviewToolServiceImpl implements IReviewToolService {
 
     /**
      * 引擎 taskType → 查看器审核类型 COMPARE/AUDIT。
-     * taskType 同时是提示词模板类型，可能是 BCXY_COMPARE / CONTENT_AUDIT / Document_Review 等任意值，
+     * taskType 同时是提示词模板类型，可能是 ATTACHMENT_COMPARE / CONTENT_AUDIT / Document_Review 等任意值，
      * 故先按关键字判定，命不中再以文件数兜底：双文件=对比，单/零文件=内容审查。
      */
     private String toReviewType(String taskType, int fileCount) {
