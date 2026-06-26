@@ -155,8 +155,8 @@ public class ReviewAgent {
             List<Long> standardIds = loadStandardIds(taskId);
             List<ReviewStandardRule> allRules = loadRules(standardIds);
 
-            // 3. 加载提示词模板（按任务类型匹配，找不到则用 general）
-            ReviewPromptTemplate template = loadPromptTemplate(task.getTaskType());
+            // 3. 加载角色身份（优先使用标准绑定的提示词模板，未配置则按任务类型匹配）
+            ReviewPromptTemplate template = loadPromptTemplate(task.getTaskType(), standardIds);
 
             // 3.1 解析模板关联的模型配置（DB驱动，热切换）；为空则走 legacy model_name 路径
             AiModelConfigDto modelConfig = resolveModelConfig(template);
@@ -230,7 +230,7 @@ public class ReviewAgent {
                 Wrappers.<ReviewTaskFile>lambdaQuery().eq(ReviewTaskFile::getTaskId, taskId));
             List<Long> standardIds = loadStandardIds(taskId);
             List<ReviewStandardRule> allRules = loadRules(standardIds);
-            ReviewPromptTemplate template = loadPromptTemplate(task.getTaskType());
+            ReviewPromptTemplate template = loadPromptTemplate(task.getTaskType(), standardIds);
             AiModelConfigDto modelConfig = resolveModelConfig(template);
 
             String queryText = task.getFormSnapshot() != null ? task.getFormSnapshot() : task.getTaskName();
@@ -794,6 +794,62 @@ public class ReviewAgent {
         }
         if (template == null) {
             throw new RuntimeException("未找到类型为 " + taskType + " 或 general 的提示词模板");
+        }
+        return template;
+    }
+
+    public ReviewPromptTemplate loadPromptTemplate(String taskType, List<Long> standardIds) {
+        ReviewPromptTemplate standardTemplate = loadPromptTemplateFromStandards(taskType, standardIds);
+        if (standardTemplate != null) {
+            return standardTemplate;
+        }
+        return loadPromptTemplate(taskType);
+    }
+
+    private ReviewPromptTemplate loadPromptTemplateFromStandards(String taskType, List<Long> standardIds) {
+        if (standardIds == null || standardIds.isEmpty()) {
+            return null;
+        }
+        List<ReviewStandard> standards = standardMapper.selectList(
+            Wrappers.<ReviewStandard>lambdaQuery()
+                .select(ReviewStandard::getId, ReviewStandard::getName, ReviewStandard::getPromptTemplateId)
+                .in(ReviewStandard::getId, standardIds)
+        );
+        if (standards.isEmpty()) {
+            return null;
+        }
+        Map<Long, ReviewStandard> standardMap = standards.stream()
+            .collect(Collectors.toMap(ReviewStandard::getId, s -> s, (a, b) -> a));
+        List<ReviewStandard> boundStandards = standardIds.stream()
+            .map(standardMap::get)
+            .filter(Objects::nonNull)
+            .filter(s -> s.getPromptTemplateId() != null)
+            .toList();
+        if (boundStandards.isEmpty()) {
+            return null;
+        }
+
+        Set<Long> templateIds = boundStandards.stream()
+            .map(ReviewStandard::getPromptTemplateId)
+            .collect(Collectors.toCollection(java.util.LinkedHashSet::new));
+        if (templateIds.size() > 1) {
+            log.warn("[ReviewAgent] 任务关联多个角色身份，已使用第一个: standards={}, templateIds={}",
+                boundStandards.stream()
+                    .map(s -> s.getId() + ":" + s.getName())
+                    .collect(Collectors.joining(", ")),
+                templateIds);
+        }
+
+        Long templateId = boundStandards.get(0).getPromptTemplateId();
+        ReviewPromptTemplate template = promptTemplateMapper.selectOne(
+            Wrappers.<ReviewPromptTemplate>lambdaQuery()
+                .eq(ReviewPromptTemplate::getId, templateId)
+                .eq(ReviewPromptTemplate::getStatus, "0")
+                .last("LIMIT 1")
+        );
+        if (template == null) {
+            log.warn("[ReviewAgent] 标准绑定的角色身份模板不存在或未启用，回退任务类型模板: templateId={}, taskType={}",
+                templateId, taskType);
         }
         return template;
     }

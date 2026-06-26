@@ -2,6 +2,8 @@ package org.dromara.review.domain;
 
 import com.baomidou.mybatisplus.annotation.TableId;
 import com.baomidou.mybatisplus.annotation.TableName;
+import com.baomidou.mybatisplus.annotation.FieldStrategy;
+import com.baomidou.mybatisplus.annotation.TableField;
 import lombok.Data;
 import lombok.EqualsAndHashCode;
 import org.dromara.common.tenant.core.TenantEntity;
@@ -39,9 +41,10 @@ public class ReviewStandard extends TenantEntity {
     private String type;
 
     /**
-     * 版本号
+     * 绑定的角色身份（提示词模板ID）
      */
-    private String version;
+    @TableField(updateStrategy = FieldStrategy.ALWAYS)
+    private Long promptTemplateId;
 
     /**
      * 描述

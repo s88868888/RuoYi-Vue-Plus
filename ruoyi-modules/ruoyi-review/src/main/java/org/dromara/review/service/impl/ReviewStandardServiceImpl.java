@@ -5,6 +5,7 @@ import com.baomidou.mybatisplus.core.toolkit.Wrappers;
 import com.baomidou.mybatisplus.extension.plugins.pagination.Page;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.dromara.common.core.exception.ServiceException;
 import org.dromara.common.core.utils.MapstructUtils;
 import org.dromara.common.core.utils.StringUtils;
 import org.dromara.common.mybatis.core.page.PageQuery;
@@ -14,6 +15,7 @@ import org.dromara.common.satoken.utils.LoginHelper;
 import org.dromara.review.domain.ReviewKnowledge;
 import org.dromara.review.domain.ReviewKnowledgeCase;
 import org.dromara.review.domain.ReviewKnowledgePattern;
+import org.dromara.review.domain.ReviewPromptTemplate;
 import org.dromara.review.domain.ReviewStandard;
 import org.dromara.review.domain.ReviewStandardKnowledge;
 import org.dromara.review.domain.ReviewStandardRule;
@@ -23,6 +25,7 @@ import org.dromara.review.domain.vo.ReviewStandardVo;
 import org.dromara.review.mapper.ReviewKnowledgeCaseMapper;
 import org.dromara.review.mapper.ReviewKnowledgeMapper;
 import org.dromara.review.mapper.ReviewKnowledgePatternMapper;
+import org.dromara.review.mapper.ReviewPromptTemplateMapper;
 import org.dromara.review.mapper.ReviewStandardKnowledgeMapper;
 import org.dromara.review.mapper.ReviewStandardMapper;
 import org.dromara.review.mapper.ReviewStandardRuleMapper;
@@ -34,6 +37,7 @@ import java.util.Collection;
 import java.util.Collections;
 import java.util.Date;
 import java.util.List;
+import java.util.Map;
 import java.util.stream.Collectors;
 
 /**
@@ -53,6 +57,7 @@ public class ReviewStandardServiceImpl implements IReviewStandardService {
     private final ReviewKnowledgeMapper reviewKnowledgeMapper;
     private final ReviewKnowledgeCaseMapper reviewKnowledgeCaseMapper;
     private final ReviewKnowledgePatternMapper reviewKnowledgePatternMapper;
+    private final ReviewPromptTemplateMapper reviewPromptTemplateMapper;
 
     /**
      * 查询审核标准详情（同时查关联的知识库和规则列表）
@@ -61,6 +66,7 @@ public class ReviewStandardServiceImpl implements IReviewStandardService {
     public ReviewStandardVo queryById(Long id) {
         ReviewStandardVo vo = baseMapper.selectVoById(id);
         if (vo != null) {
+            fillPromptTemplateName(List.of(vo));
             // 查询关联的规则列表
             List<ReviewStandardRule> rules = reviewStandardRuleMapper.selectList(
                 Wrappers.<ReviewStandardRule>lambdaQuery()
@@ -88,6 +94,7 @@ public class ReviewStandardServiceImpl implements IReviewStandardService {
         LambdaQueryWrapper<ReviewStandard> lqw = buildQueryWrapper(bo);
         Page<ReviewStandardVo> result = baseMapper.selectVoPage(pageQuery.build(), lqw);
         fillRuleCount(result.getRecords());
+        fillPromptTemplateName(result.getRecords());
         return TableDataInfo.build(result);
     }
 
@@ -102,6 +109,27 @@ public class ReviewStandardServiceImpl implements IReviewStandardService {
             .collect(Collectors.groupingBy(ReviewStandardRule::getStandardId, Collectors.counting()));
         for (ReviewStandardVo vo : rows) {
             vo.setRuleCount(countMap.getOrDefault(vo.getId(), 0L).intValue());
+        }
+    }
+
+    private void fillPromptTemplateName(List<ReviewStandardVo> rows) {
+        if (CollUtil.isEmpty(rows)) return;
+        List<Long> templateIds = rows.stream()
+            .map(ReviewStandardVo::getPromptTemplateId)
+            .filter(java.util.Objects::nonNull)
+            .distinct()
+            .toList();
+        if (CollUtil.isEmpty(templateIds)) return;
+        Map<Long, String> nameMap = reviewPromptTemplateMapper.selectList(
+                Wrappers.<ReviewPromptTemplate>lambdaQuery()
+                    .select(ReviewPromptTemplate::getId, ReviewPromptTemplate::getName)
+                    .in(ReviewPromptTemplate::getId, templateIds)
+            ).stream()
+            .collect(Collectors.toMap(ReviewPromptTemplate::getId, ReviewPromptTemplate::getName, (a, b) -> a));
+        for (ReviewStandardVo vo : rows) {
+            if (vo.getPromptTemplateId() != null) {
+                vo.setPromptTemplateName(nameMap.get(vo.getPromptTemplateId()));
+            }
         }
     }
 
@@ -121,6 +149,7 @@ public class ReviewStandardServiceImpl implements IReviewStandardService {
     @Override
     @Transactional(rollbackFor = Exception.class)
     public Boolean insertByBo(ReviewStandardBo bo) {
+        validatePromptTemplate(bo.getPromptTemplateId());
 
         bo.setCreateBy(LoginHelper.getUserId());
         bo.setCreateTime(new Date());
@@ -131,9 +160,6 @@ public class ReviewStandardServiceImpl implements IReviewStandardService {
         }
         if (bo.getStatus() == null || bo.getStatus().isBlank()) {
             bo.setStatus("0");
-        }
-        if (bo.getVersion() == null || bo.getVersion().isBlank()) {
-            bo.setVersion("v1.0");
         }
         ReviewStandard add = MapstructUtils.convert(bo, ReviewStandard.class);
         boolean flag = baseMapper.insert(add) > 0;
@@ -149,11 +175,25 @@ public class ReviewStandardServiceImpl implements IReviewStandardService {
     @Override
     @Transactional(rollbackFor = Exception.class)
     public Boolean updateByBo(ReviewStandardBo bo) {
+        validatePromptTemplate(bo.getPromptTemplateId());
 
         bo.setUpdateBy(LoginHelper.getUserId());
         bo.setUpdateTime(new Date());
         ReviewStandard update = MapstructUtils.convert(bo, ReviewStandard.class);
         return baseMapper.updateById(update) > 0;
+    }
+
+    private void validatePromptTemplate(Long promptTemplateId) {
+        if (promptTemplateId == null) {
+            throw new ServiceException("请选择角色身份");
+        }
+        ReviewPromptTemplate template = reviewPromptTemplateMapper.selectById(promptTemplateId);
+        if (template == null) {
+            throw new ServiceException("选择的角色身份不存在");
+        }
+        if (!"0".equals(template.getStatus())) {
+            throw new ServiceException("选择的角色身份已停用");
+        }
     }
 
     /**

@@ -39,9 +39,10 @@ public class ReviewStandardBo extends BaseEntity {
     private String type;
 
     /**
-     * 版本号
+     * 绑定的角色身份（提示词模板ID）
      */
-    private String version;
+    @NotNull(message = "请选择角色身份", groups = {AddGroup.class, EditGroup.class})
+    private Long promptTemplateId;
 
     /**
      * 描述

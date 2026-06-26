@@ -62,7 +62,7 @@ public class PrepareNode implements NodeAction {
         ctx.setRules(rules);
 
         // 3. 模板 + 模型配置
-        ctx.setTemplate(reviewAgent.loadPromptTemplate(task.getTaskType()));
+        ctx.setTemplate(reviewAgent.loadPromptTemplate(task.getTaskType(), standardIds));
         ctx.setModelConfig(reviewAgent.resolveModelConfig(ctx.getTemplate()));
 
         // 4. RAG 初始知识上下文 + 规则文本

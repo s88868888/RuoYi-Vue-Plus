@@ -7,6 +7,7 @@ import com.baomidou.mybatisplus.extension.plugins.pagination.Page;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import cn.hutool.core.bean.BeanUtil;
+import org.dromara.common.core.exception.ServiceException;
 import org.dromara.common.core.utils.StringUtils;
 import org.dromara.common.mybatis.core.page.PageQuery;
 import org.dromara.common.mybatis.core.page.TableDataInfo;
@@ -22,9 +23,11 @@ import org.dromara.review.agent.ReviewAgent;
 import org.dromara.review.graph.ReviewGraphAgent;
 import org.springframework.beans.factory.annotation.Value;
 import org.dromara.review.domain.ReviewKnowledgeMisjudgment;
+import org.dromara.review.domain.ReviewPromptTemplate;
 import org.dromara.review.domain.ReviewStandardKnowledge;
 import org.dromara.review.domain.ReviewStandardRule;
 import org.dromara.review.mapper.ReviewKnowledgeMisjudgmentMapper;
+import org.dromara.review.mapper.ReviewPromptTemplateMapper;
 import org.dromara.review.mapper.ReviewResultItemMapper;
 import org.dromara.review.mapper.ReviewStandardKnowledgeMapper;
 import org.dromara.review.mapper.ReviewStandardRuleMapper;
@@ -57,10 +60,15 @@ import java.util.Map;
 @Service
 public class ReviewTaskServiceImpl implements IReviewTaskService {
 
+    private static final String SOURCE_TYPE_AI_TOOL = "AI_TOOL";
+    private static final String TASK_TYPE_BCXY_COMPARE = "BCXY_COMPARE";
+    private static final String TASK_TYPE_CONTENT_AUDIT = "CONTENT_AUDIT";
+
     private final ReviewTaskMapper baseMapper;
     private final ReviewTaskStandardMapper reviewTaskStandardMapper;
     private final ReviewTaskFileMapper reviewTaskFileMapper;
     private final ReviewStandardMapper reviewStandardMapper;
+    private final ReviewPromptTemplateMapper reviewPromptTemplateMapper;
     private final ReviewResultItemMapper reviewResultItemMapper;
     private final ReviewKnowledgeMisjudgmentMapper misjudgmentMapper;
     private final ReviewStandardKnowledgeMapper standardKnowledgeMapper;
@@ -189,6 +197,8 @@ public class ReviewTaskServiceImpl implements IReviewTaskService {
     @Override
     @Transactional(rollbackFor = Exception.class)
     public Long createTask(ReviewTaskBo bo) {
+        validateToolStandardSelection(bo);
+
         // 1. 命中同来源旧任务 → 走"复用同一行"分支
         //    去重键: sourceId + sourceType + taskType，保证同一业务对象的不同审核类型各自独立
         ReviewTask existing = null;
@@ -263,6 +273,37 @@ public class ReviewTaskServiceImpl implements IReviewTaskService {
         insertFiles(task.getId(), bo.getFiles());
         triggerExecuteIfExternal(bo, task.getId());
         return task.getId();
+    }
+
+    private void validateToolStandardSelection(ReviewTaskBo bo) {
+        if (bo == null || !SOURCE_TYPE_AI_TOOL.equals(bo.getSourceType())) {
+            return;
+        }
+        if (!TASK_TYPE_BCXY_COMPARE.equals(bo.getTaskType())
+            && !TASK_TYPE_CONTENT_AUDIT.equals(bo.getTaskType())) {
+            return;
+        }
+        List<Long> standardIds = bo.getStandardIds();
+        if (CollUtil.isEmpty(standardIds)) {
+            throw new ServiceException("请选择审核标准");
+        }
+        if (standardIds.size() > 1) {
+            throw new ServiceException("附件对比和内容审核每次只能选择一个审核标准");
+        }
+        ReviewStandard standard = reviewStandardMapper.selectById(standardIds.get(0));
+        if (standard == null) {
+            throw new ServiceException("选择的审核标准不存在");
+        }
+        if (standard.getPromptTemplateId() == null) {
+            throw new ServiceException("审核标准未配置角色身份，请先编辑审核标准后再提交审核");
+        }
+        ReviewPromptTemplate template = reviewPromptTemplateMapper.selectById(standard.getPromptTemplateId());
+        if (template == null) {
+            throw new ServiceException("审核标准绑定的角色身份不存在，请先编辑审核标准后再提交审核");
+        }
+        if (!"0".equals(template.getStatus())) {
+            throw new ServiceException("审核标准绑定的角色身份已停用，请先更换角色身份后再提交审核");
+        }
     }
 
     private void insertStandards(Long taskId, List<Long> standardIds) {

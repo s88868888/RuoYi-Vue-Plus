@@ -45,10 +45,16 @@ public class ReviewStandardVo implements Serializable {
     private String type;
 
     /**
-     * 版本号
+     * 绑定的角色身份（提示词模板ID）
      */
-    @ExcelProperty(value = "版本号")
-    private String version;
+    @ExcelProperty(value = "角色身份ID")
+    private Long promptTemplateId;
+
+    /**
+     * 角色身份名称
+     */
+    @ExcelProperty(value = "角色身份")
+    private String promptTemplateName;
 
     /**
      * 描述
