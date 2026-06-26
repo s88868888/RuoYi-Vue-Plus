@@ -42,8 +42,10 @@ public class ReviewStatisticsController extends BaseController {
     public R<Map<String, Object>> overview() {
         List<ReviewTask> tasks = reviewTaskMapper.selectList(Wrappers.lambdaQuery());
         int total = tasks.size();
-        long passCount = tasks.stream().filter(t -> "pass".equals(t.getPassStatus())).count();
-        long failCount = tasks.stream().filter(t -> "fail".equals(t.getPassStatus())).count();
+        List<ReviewTask> auditTasks = tasks.stream().filter(t -> !isCompareTask(t)).toList();
+        int auditTotal = auditTasks.size();
+        long passCount = auditTasks.stream().filter(t -> "pass".equals(t.getPassStatus())).count();
+        long failCount = auditTasks.stream().filter(t -> "fail".equals(t.getPassStatus())).count();
         OptionalDouble avgOpt = tasks.stream()
             .filter(t -> t.getReviewDuration() != null && t.getReviewDuration() > 0)
             .mapToLong(ReviewTask::getReviewDuration)
@@ -52,9 +54,9 @@ public class ReviewStatisticsController extends BaseController {
 
         Map<String, Object> result = new HashMap<>();
         result.put("total", total);
-        result.put("passRate", total > 0 ? Math.round(passCount * 100.0 / total) + "%" : "0%");
+        result.put("passRate", auditTotal > 0 ? Math.round(passCount * 100.0 / auditTotal) + "%" : "0%");
         result.put("avgTime", avgDuration > 0 ? (avgDuration / 1000) + "s" : "0s");
-        result.put("issueRate", total > 0 ? Math.round(failCount * 100.0 / total) + "%" : "0%");
+        result.put("issueRate", auditTotal > 0 ? Math.round(failCount * 100.0 / auditTotal) + "%" : "0%");
         return R.ok(result);
     }
 
@@ -83,11 +85,12 @@ public class ReviewStatisticsController extends BaseController {
             LocalDate date = startDate.plus(i, ChronoUnit.DAYS);
             String dateStr = date.toString();
             List<ReviewTask> dayTasks = grouped.getOrDefault(dateStr, Collections.emptyList());
+            List<ReviewTask> dayAuditTasks = dayTasks.stream().filter(t -> !isCompareTask(t)).toList();
             Map<String, Object> item = new LinkedHashMap<>();
             item.put("date", dateStr);
             item.put("total", dayTasks.size());
-            item.put("passCount", dayTasks.stream().filter(t -> "pass".equals(t.getPassStatus())).count());
-            item.put("failCount", dayTasks.stream().filter(t -> "fail".equals(t.getPassStatus())).count());
+            item.put("passCount", dayAuditTasks.stream().filter(t -> "pass".equals(t.getPassStatus())).count());
+            item.put("failCount", dayAuditTasks.stream().filter(t -> "fail".equals(t.getPassStatus())).count());
             result.add(item);
         }
         return R.ok(result);
@@ -99,7 +102,9 @@ public class ReviewStatisticsController extends BaseController {
     @SaCheckPermission("review:task:list")
     @GetMapping("/passStatus")
     public R<List<Map<String, Object>>> passStatus() {
-        List<ReviewTask> tasks = reviewTaskMapper.selectList(Wrappers.lambdaQuery());
+        List<ReviewTask> tasks = reviewTaskMapper.selectList(Wrappers.lambdaQuery()).stream()
+            .filter(t -> !isCompareTask(t))
+            .toList();
         long passCount = tasks.stream().filter(t -> "pass".equals(t.getPassStatus())).count();
         long failCount = tasks.stream().filter(t -> "fail".equals(t.getPassStatus())).count();
         long otherCount = tasks.size() - passCount - failCount;
@@ -121,6 +126,11 @@ public class ReviewStatisticsController extends BaseController {
         result.add(otherItem);
 
         return R.ok(result);
+    }
+
+    private boolean isCompareTask(ReviewTask task) {
+        return task != null && task.getTaskType() != null
+            && task.getTaskType().toUpperCase().contains("COMPARE");
     }
 
     /**

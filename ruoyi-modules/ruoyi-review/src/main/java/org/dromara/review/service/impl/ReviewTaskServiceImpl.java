@@ -279,8 +279,10 @@ public class ReviewTaskServiceImpl implements IReviewTaskService {
         if (bo == null || !SOURCE_TYPE_AI_TOOL.equals(bo.getSourceType())) {
             return;
         }
-        if (!TASK_TYPE_BCXY_COMPARE.equals(bo.getTaskType())
-            && !TASK_TYPE_CONTENT_AUDIT.equals(bo.getTaskType())) {
+        if (TASK_TYPE_BCXY_COMPARE.equals(bo.getTaskType())) {
+            return;
+        }
+        if (!TASK_TYPE_CONTENT_AUDIT.equals(bo.getTaskType())) {
             return;
         }
         List<Long> standardIds = bo.getStandardIds();
@@ -288,7 +290,7 @@ public class ReviewTaskServiceImpl implements IReviewTaskService {
             throw new ServiceException("请选择审核标准");
         }
         if (standardIds.size() > 1) {
-            throw new ServiceException("附件对比和内容审核每次只能选择一个审核标准");
+            throw new ServiceException("内容审核每次只能选择一个审核标准");
         }
         ReviewStandard standard = reviewStandardMapper.selectById(standardIds.get(0));
         if (standard == null) {

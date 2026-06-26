@@ -184,10 +184,14 @@ public class ReviewAgent {
             updateTaskStatus(task, result, duration, allRules, modelUsed, aiResponse);
 
             // 8. 写入知识库案例（审核完成后自动沉淀）
-            saveToKnowledgeCase(task, standardIds);
+            if (!isCompareTask(task)) {
+                saveToKnowledgeCase(task, standardIds);
+            }
 
             // 9. 聚合问题模式（同类问题出现≥3次自动归纳）
-            aggregatePatterns(task, standardIds);
+            if (!isCompareTask(task)) {
+                aggregatePatterns(task, standardIds);
+            }
 
             // 10. 回调外部系统（成功路径）
             try { callbackExternalSystem(task); } catch (Exception ex) { log.warn("[ReviewAgent] 成功路径回调失败 taskId={}", taskId, ex); }
@@ -1077,6 +1081,11 @@ public class ReviewAgent {
     }
 
     public void saveResultItems(ReviewTask task, JSONObject result, List<ReviewStandardRule> rules) {
+        if (isCompareTask(task)) {
+            log.info("[ReviewAgent] 附件对比任务不保存规则审核明细: taskId={}", task.getId());
+            return;
+        }
+
         JSONArray items = result.getJSONArray("items");
         if (items == null || items.isEmpty()) {
             log.warn("[ReviewAgent] AI未返回审核明细项");
@@ -1154,6 +1163,11 @@ public class ReviewAgent {
     }
 
     public void updateTaskStatus(ReviewTask task, JSONObject result, long duration, List<ReviewStandardRule> allRules, String modelUsed, String aiResponse) {
+        if (isCompareTask(task)) {
+            updateCompareTaskStatus(task, result, duration, modelUsed, aiResponse);
+            return;
+        }
+
         task.setStatus("completed");
         task.setPassStatus(mapPassStatus(result.getString("pass_status")));
         task.setAiModel(modelUsed);
@@ -1207,6 +1221,48 @@ public class ReviewAgent {
                 standardMapper.updateById(standard);
             }
         }
+    }
+
+    private void updateCompareTaskStatus(ReviewTask task, JSONObject result, long duration, String modelUsed, String aiResponse) {
+        task.setStatus("completed");
+        task.setPassStatus("pending");
+        task.setAiModel(modelUsed);
+        task.setReviewDuration(duration);
+        task.setAiSummary(result.getString("summary"));
+        task.setResultJson(aiResponse);
+        task.setResultMarkdown(result.getString("detail_markdown"));
+        task.setTotalRules(0);
+        task.setPassCount(0);
+        task.setErrorCount(0);
+        task.setWarningCount(0);
+        task.setInfoCount(0);
+        task.setMisjudgedCount(0);
+
+        JSONArray focusItems = result.getJSONArray("focus_items");
+        if (focusItems != null && !focusItems.isEmpty()) {
+            task.setFocusData(focusItems.toJSONString());
+        }
+
+        taskMapper.updateById(task);
+        incrementStandardUseCount(task.getId());
+    }
+
+    private void incrementStandardUseCount(Long taskId) {
+        List<ReviewTaskStandard> taskStandards = taskStandardMapper.selectList(
+            Wrappers.<ReviewTaskStandard>lambdaQuery().eq(ReviewTaskStandard::getTaskId, taskId)
+        );
+        for (ReviewTaskStandard ts : taskStandards) {
+            ReviewStandard standard = standardMapper.selectById(ts.getStandardId());
+            if (standard != null) {
+                standard.setUseCount(standard.getUseCount() + 1);
+                standardMapper.updateById(standard);
+            }
+        }
+    }
+
+    private boolean isCompareTask(ReviewTask task) {
+        return task != null && task.getTaskType() != null
+            && task.getTaskType().toUpperCase().contains("COMPARE");
     }
 
     // ==================== 加权评分 ====================
@@ -1275,6 +1331,7 @@ public class ReviewAgent {
 
     public void saveToKnowledgeCase(ReviewTask task, List<Long> standardIds) {
         try {
+            if (isCompareTask(task)) return;
             if (standardIds.isEmpty()) return;
 
             // 守卫：避免把"失败/无效"的审核结果写入知识库，否则 RAG 会反复检索到这些反例形成自证预言
@@ -1371,6 +1428,7 @@ public class ReviewAgent {
      */
     public void aggregatePatterns(ReviewTask task, List<Long> standardIds) {
         try {
+            if (isCompareTask(task)) return;
             if (standardIds.isEmpty()) return;
 
             List<ReviewStandardKnowledge> skList = standardKnowledgeMapper.selectList(
