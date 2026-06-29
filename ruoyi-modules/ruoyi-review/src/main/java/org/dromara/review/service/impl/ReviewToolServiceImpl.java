@@ -7,6 +7,7 @@ import com.alibaba.fastjson2.JSONObject;
 import com.baomidou.mybatisplus.core.toolkit.Wrappers;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.dromara.common.core.service.ConfigService;
 import org.dromara.common.core.utils.StringUtils;
 import org.dromara.common.oss.core.OssClient;
 import org.dromara.common.oss.entity.UploadResult;
@@ -55,6 +56,9 @@ import java.util.stream.Collectors;
 @RequiredArgsConstructor
 public class ReviewToolServiceImpl implements IReviewToolService {
 
+    private static final String TASK_TYPE_FILE_REDACT = "FILE_REDACT";
+    private static final String CONFIG_CONTENT_AUDIT_REDACT_ENABLED = "review.contentAudit.redact.enabled";
+
     private final ReviewTaskMapper taskMapper;
     private final ReviewTaskFileMapper taskFileMapper;
     private final ReviewResultItemMapper resultItemMapper;
@@ -63,6 +67,7 @@ public class ReviewToolServiceImpl implements IReviewToolService {
     private final ReviewStandardFocusMapper standardFocusMapper;
     private final ReviewOcrAsyncService ocrAsyncService;
     private final ISysOssService ossService;
+    private final ConfigService configService;
 
     @Override
     public ReviewToolResultVo getToolResult(Long taskId) {
@@ -70,6 +75,8 @@ public class ReviewToolServiceImpl implements IReviewToolService {
         if (task == null) {
             return null;
         }
+        boolean isFileRedactTask = TASK_TYPE_FILE_REDACT.equalsIgnoreCase(task.getTaskType());
+
         ReviewToolResultVo vo = new ReviewToolResultVo();
         vo.setId(String.valueOf(task.getId()));
         vo.setReviewTaskId(task.getId());
@@ -81,7 +88,6 @@ public class ReviewToolServiceImpl implements IReviewToolService {
         vo.setInfoCount(task.getInfoCount());
         vo.setAiSummary(task.getAiSummary());
         vo.setNoteData(task.getNoteData());
-        vo.setRedactData(task.getRedactData());
         vo.setCreatetime(task.getCreateTime());
         vo.setUpdatetime(task.getUpdateTime());
         if ("FAIL".equals(vo.getStatus())) {
@@ -97,6 +103,8 @@ public class ReviewToolServiceImpl implements IReviewToolService {
         // 仅凭关键字判定会落空 → 双文件=对比，单文件=内容审查。
         vo.setReviewtype(toReviewType(task.getTaskType(), files.size()));
         boolean isCompare = "COMPARE".equals(vo.getReviewtype());
+        boolean focusFeatureVisible = isFileRedactTask || isCompare || isContentAuditRedactEnabled();
+        vo.setRedactData(focusFeatureVisible ? task.getRedactData() : null);
         ReviewTaskFile signFile;
         if (isCompare) {
             ReviewTaskFile baseFile = !files.isEmpty() ? files.get(0) : null;
@@ -165,11 +173,17 @@ public class ReviewToolServiceImpl implements IReviewToolService {
         vo.setTotalIssues(issues.size());
 
         // ===== 关注列表(focusItems) / 关注要点(focusKeywords) / 关注分类(focusCategories) =====
-        vo.setFocusItems(parseFocusItems(task.getFocusData()));
+        vo.setFocusItems(focusFeatureVisible ? parseFocusItems(task.getFocusData()) : new ArrayList<>());
         List<Long> standardIds = taskStandardMapper.selectList(
                 Wrappers.<ReviewTaskStandard>lambdaQuery().eq(ReviewTaskStandard::getTaskId, taskId))
             .stream().map(ReviewTaskStandard::getStandardId).distinct().collect(Collectors.toList());
-        vo.setFocusKeywords(loadFocusKeywords(standardIds));
+        if (isFileRedactTask) {
+            vo.setFocusKeywords(loadRedactFocusKeywords(task.getFormSnapshot()));
+        } else if (focusFeatureVisible) {
+            vo.setFocusKeywords(loadFocusKeywords(standardIds));
+        } else {
+            vo.setFocusKeywords(new ArrayList<>());
+        }
         vo.setFocusCategories(deriveFocusCategories(vo.getFocusItems()));
 
         return vo;
@@ -350,6 +364,9 @@ public class ReviewToolServiceImpl implements IReviewToolService {
             if (t.contains("COMPARE")) {
                 return "COMPARE";
             }
+            if (t.contains("REDACT")) {
+                return "REDACT";
+            }
             if (t.contains("AUDIT")) {
                 return "AUDIT";
             }
@@ -421,6 +438,48 @@ public class ReviewToolServiceImpl implements IReviewToolService {
         return result;
     }
 
+    /** 文件脱敏展示本次勾选的关注点；审核标准关联仅用于列表标准名和工程包标注。 */
+    private List<ReviewToolResultVo.FocusKeyword> loadRedactFocusKeywords(String formSnapshot) {
+        List<ReviewToolResultVo.FocusKeyword> result = new ArrayList<>();
+        if (StringUtils.isBlank(formSnapshot)) {
+            return result;
+        }
+        try {
+            JSONObject payload = JSON.parseObject(formSnapshot);
+            JSONArray arr = payload.getJSONArray("focusPoints");
+            if (arr == null) {
+                arr = payload.getJSONArray("focus_points");
+            }
+            if (arr == null) {
+                return result;
+            }
+            Set<String> seen = new LinkedHashSet<>();
+            for (int i = 0; i < arr.size(); i++) {
+                Object raw = arr.get(i);
+                String keyword;
+                if (raw instanceof JSONObject obj) {
+                    keyword = obj.getString("keyword");
+                } else {
+                    keyword = String.valueOf(raw);
+                }
+                if (StringUtils.isBlank(keyword)) {
+                    continue;
+                }
+                String point = keyword.trim();
+                if (!seen.add(point)) {
+                    continue;
+                }
+                ReviewToolResultVo.FocusKeyword fk = new ReviewToolResultVo.FocusKeyword();
+                fk.setKeyword(point);
+                fk.setCategory(null);
+                result.add(fk);
+            }
+        } catch (Exception e) {
+            log.warn("[ReviewTool] 解析文件脱敏关注点失败: {}", e.getMessage());
+        }
+        return result;
+    }
+
     /** 所选标准的关注要点（review_standard_focus，启用项） */
     private List<ReviewToolResultVo.FocusKeyword> loadFocusKeywords(List<Long> standardIds) {
         List<ReviewToolResultVo.FocusKeyword> result = new ArrayList<>();
@@ -459,5 +518,24 @@ public class ReviewToolServiceImpl implements IReviewToolService {
 
     private String firstNonBlank(String a, String b) {
         return StringUtils.isNotBlank(a) ? a : b;
+    }
+
+    private boolean isContentAuditRedactEnabled() {
+        try {
+            String value = configService.getConfigValue(CONFIG_CONTENT_AUDIT_REDACT_ENABLED);
+            if (StringUtils.isBlank(value)) {
+                return true;
+            }
+            String normalized = value.trim().toLowerCase();
+            if ("false".equals(normalized) || "0".equals(normalized)
+                || "n".equals(normalized) || "no".equals(normalized) || "off".equals(normalized)) {
+                return false;
+            }
+            return true;
+        } catch (Exception e) {
+            log.warn("[ReviewTool] 读取系统参数 {} 失败，默认显示内容审核定位脱敏: {}",
+                CONFIG_CONTENT_AUDIT_REDACT_ENABLED, e.getMessage());
+            return true;
+        }
     }
 }

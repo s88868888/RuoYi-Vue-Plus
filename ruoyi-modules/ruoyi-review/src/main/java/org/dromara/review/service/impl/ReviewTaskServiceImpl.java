@@ -64,6 +64,7 @@ public class ReviewTaskServiceImpl implements IReviewTaskService {
     private static final String SOURCE_TYPE_AI_TOOL = "AI_TOOL";
     private static final String TASK_TYPE_ATTACHMENT_COMPARE = "ATTACHMENT_COMPARE";
     private static final String TASK_TYPE_CONTENT_AUDIT = "CONTENT_AUDIT";
+    private static final String TASK_TYPE_FILE_REDACT = "FILE_REDACT";
 
     private final ReviewTaskMapper baseMapper;
     private final ReviewTaskStandardMapper reviewTaskStandardMapper;
@@ -287,6 +288,9 @@ public class ReviewTaskServiceImpl implements IReviewTaskService {
         if (TASK_TYPE_ATTACHMENT_COMPARE.equals(bo.getTaskType())) {
             return;
         }
+        if (TASK_TYPE_FILE_REDACT.equals(bo.getTaskType())) {
+            return;
+        }
         if (!TASK_TYPE_CONTENT_AUDIT.equals(bo.getTaskType())) {
             return;
         }
@@ -381,6 +385,11 @@ public class ReviewTaskServiceImpl implements IReviewTaskService {
     @Async
     @Override
     public void executeReview(Long taskId) {
+        ReviewTask task = baseMapper.selectById(taskId);
+        if (task != null && TASK_TYPE_FILE_REDACT.equalsIgnoreCase(task.getTaskType())) {
+            reviewAgent.execute(taskId);
+            return;
+        }
         if ("graph".equalsIgnoreCase(reviewEngine)) {
             log.info("[ReviewTask] 使用 Graph 审核引擎 taskId={}", taskId);
             reviewGraphAgent.execute(taskId);

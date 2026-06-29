@@ -33,7 +33,7 @@ public class InitialReviewNode implements NodeAction {
         log.info("[Graph:initial_review] 第 {} 轮审核开始: taskId={}", round, ctx.getTask().getId());
 
         String systemPrompt = reviewAgent.buildSystemPrompt(
-            ctx.getTemplate(), ctx.getRulesText(), ctx.getKnowledgeContext(), ctx.getRules());
+            ctx.getTemplate(), ctx.getRulesText(), ctx.getKnowledgeContext(), ctx.getRules(), ctx.getTask());
 
         // 重审：把上一轮自校验的疑点拼进 system prompt，引导模型针对性复核
         if (round > 1 && !ctx.getVerifyDoubts().isEmpty()) {

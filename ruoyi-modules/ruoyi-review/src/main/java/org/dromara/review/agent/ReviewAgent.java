@@ -11,6 +11,7 @@ import org.dromara.common.ai.dto.AiModelConfigDto;
 import org.dromara.common.ai.ocr.OcrProviderFactory;
 import org.dromara.common.ai.service.AiChatService;
 import org.dromara.common.ai.util.PdfTextExtractor;
+import org.dromara.common.core.service.ConfigService;
 import org.dromara.common.oss.core.OssClient;
 import org.dromara.common.oss.factory.OssFactory;
 import org.dromara.common.tenant.helper.TenantHelper;
@@ -64,6 +65,9 @@ import java.util.stream.Collectors;
 @RequiredArgsConstructor
 public class ReviewAgent {
 
+    private static final String TASK_TYPE_FILE_REDACT = "FILE_REDACT";
+    private static final String CONFIG_CONTENT_AUDIT_REDACT_ENABLED = "review.contentAudit.redact.enabled";
+
     private final AiChatService aiChatService;
     private final OcrProviderFactory ocrProviderFactory;
     private final ISysOssService ossService;
@@ -81,6 +85,7 @@ public class ReviewAgent {
     private final ReviewKnowledgePatternMapper knowledgePatternMapper;
     private final ReviewKnowledgeMapper knowledgeMapper;
     private final IReviewModelConfigService modelConfigService;
+    private final ConfigService configService;
 
     /** 回调签名共享密钥，外部系统验签必须用相同值 */
     @Value("${review.webhook.secret:}")
@@ -143,6 +148,11 @@ public class ReviewAgent {
         log.info("[ReviewAgent] 开始审核: id={}, name={}, type={}", taskId, task.getTaskName(), task.getTaskType());
 
         try {
+            if (isRedactTask(task)) {
+                executeRedact(task, startTime);
+                return;
+            }
+
             task.setStatus("reviewing");
             taskMapper.updateById(task);
 
@@ -167,7 +177,7 @@ public class ReviewAgent {
             String rulesText = buildRulesText(allRules);
 
             // 5. 组装 Prompt（抽取为 public 方法，供 Graph 编排节点复用）
-            String systemPrompt = buildSystemPrompt(template, rulesText, knowledgeContext, allRules);
+            String systemPrompt = buildSystemPrompt(template, rulesText, knowledgeContext, allRules, task);
             String userPrompt = buildUserPrompt(template, task);
 
             // 6. 根据附件类型选择 AI 调用方式
@@ -240,7 +250,7 @@ public class ReviewAgent {
             String queryText = task.getFormSnapshot() != null ? task.getFormSnapshot() : task.getTaskName();
             String knowledgeContext = reviewRagService.buildEnrichedContext(standardIds, queryText);
             String rulesText = buildRulesText(allRules);
-            String systemPrompt = buildSystemPrompt(template, rulesText, knowledgeContext, allRules);
+            String systemPrompt = buildSystemPrompt(template, rulesText, knowledgeContext, allRules, task);
             String userPrompt = buildUserPrompt(template, task);
 
             String aiResponse = callAi(files, systemPrompt, userPrompt, template, modelConfig);
@@ -259,7 +269,16 @@ public class ReviewAgent {
      */
     public String buildSystemPrompt(ReviewPromptTemplate template, String rulesText,
                                     String knowledgeContext, List<ReviewStandardRule> allRules) {
+        return buildSystemPrompt(template, rulesText, knowledgeContext, allRules, null);
+    }
+
+    public String buildSystemPrompt(ReviewPromptTemplate template, String rulesText,
+                                    String knowledgeContext, List<ReviewStandardRule> allRules, ReviewTask task) {
+        boolean contentAuditRedactEnabled = shouldIncludeFocusItemsInPrompt(task);
         String outputFormat = template.getOutputFormat() != null ? template.getOutputFormat() : "";
+        if (!contentAuditRedactEnabled) {
+            outputFormat = stripFocusItemsSchema(outputFormat);
+        }
 
         // 构建 field_name 白名单（取规则的 check_field，没有就用 rule_<id>）
         StringBuilder whitelistSb = new StringBuilder();
@@ -276,8 +295,57 @@ public class ReviewAgent {
         String fieldWhitelist = whitelistSb.toString();
         String ruleCount = String.valueOf(allRules.size());
 
-        // 构建 focus_keywords：从独立的关注表 review_standard_focus 读取（按规则涉及的标准ID）
-        // 每条启用的关注要点 = 一个精确提取指令。关注列表已与规则解耦
+        String focusInstruction = contentAuditRedactEnabled ? buildFocusInstruction(allRules) : "";
+
+        String systemPrompt = template.getSystemPrompt();
+        if (!contentAuditRedactEnabled) {
+            systemPrompt = stripLegacyFocusPrompt(systemPrompt);
+        }
+
+        String basePrompt = systemPrompt
+            .replace("{rules}", rulesText)
+            .replace("{knowledge_context}", knowledgeContext)
+            .replace("{output_format}", outputFormat)
+            .replace("{field_whitelist}", fieldWhitelist)
+            .replace("{rule_count}", ruleCount);
+        // 兼容：如果模板里还残留 {focus_categories} 旧占位符则清空（关注已迁出到独立关注表，不再用分类）
+        if (basePrompt.contains("{focus_categories}")) {
+            basePrompt = basePrompt.replace("{focus_categories}", "（无）");
+        }
+        // 兜底：模板未引用 {output_format} 占位符（system/user 提示词都没写）时，schema 不会被注入，
+        // AI 会自由发挥返回与解析器期望(items)不符的结构（如 audit_result）→ 异常清单静默为空、零报错难排查。
+        // 此处把 output_format 自动追加到主体末尾，并 warn 提示模板配置缺陷，建议补全模板。
+        String userTpl = template.getUserPrompt() != null ? template.getUserPrompt() : "";
+        boolean outputFormatReferenced = systemPrompt.contains("{output_format}")
+            || userTpl.contains("{output_format}");
+        if (!outputFormatReferenced && !outputFormat.isBlank()) {
+            basePrompt = basePrompt + "\n\n请严格按以下JSON格式返回：\n" + outputFormat;
+            log.warn("[ReviewAgent] 模板(id={}, type={}) 未引用 output_format 占位符，已自动追加输出格式 schema 兜底，建议补全模板配置",
+                template.getId(), template.getType());
+        }
+        return basePrompt + focusInstruction;
+    }
+
+    private String stripLegacyFocusPrompt(String prompt) {
+        if (prompt == null || prompt.isBlank()) {
+            return "";
+        }
+        return prompt
+            .replaceAll("(?s)\\n*【关注列表 focus_items】.*?(?=\\n\\n【|$)", "")
+            .replaceAll("(?s)\\n*【关注列表 focus_items·严格约束】.*?(?=\\n\\n【|$)", "")
+            .replaceAll("(?s)\\n*【关注列表[^】]*】.*?(?=\\n\\n【|$)", "");
+    }
+
+    private String stripFocusItemsSchema(String outputFormat) {
+        if (outputFormat == null || outputFormat.isBlank() || !outputFormat.contains("focus_items")) {
+            return outputFormat == null ? "" : outputFormat;
+        }
+        String cleaned = outputFormat.replaceAll("(?s),\\s*\"focus_items\"\\s*:\\s*\\[[\\s\\S]*?\\n\\s*\\]\\s*(?=\\n\\})", "");
+        cleaned = cleaned.replaceAll("(?m)^严格：(.*)\\s*6\\)focus_items[^\\n]*", "严格：$1");
+        return cleaned;
+    }
+
+    private String buildFocusInstruction(List<ReviewStandardRule> allRules) {
         java.util.List<String> focusPoints = new java.util.ArrayList<>();
         java.util.LinkedHashSet<Long> stdIdSet = new java.util.LinkedHashSet<>();
         for (ReviewStandardRule r : allRules) {
@@ -297,61 +365,85 @@ public class ReviewAgent {
             }
         }
 
-        // 动态生成关注列表指令段（从关注表动态读取，不写死在 prompt 模板）
-        String focusInstruction = "";
-        if (!focusPoints.isEmpty()) {
-            StringBuilder pointSb = new StringBuilder();
-            for (int i = 0; i < focusPoints.size(); i++) {
-                pointSb.append("  ").append(i + 1).append(". 关注要点：\"").append(focusPoints.get(i)).append("\"\n");
-            }
-            focusInstruction = "\n\n【关注列表 focus_items·严格约束】除 items 外，还需输出 focus_items 数组。\n"
-                + "需要逐一定位的关注要点如下：\n" + pointSb
-                + "严格规则：\n"
-                + "1) 针对上述每个关注要点，在文档中找出【所有】与该要点相关的原文片段——"
-                + "若同一要点在文中对应多处不同内容（例如「地址」可能有甲方地址、乙方地址、见证方地址），"
-                + "则每一处各输出一条 focus_item（keyword 相同、extracted_value 不同），不要只取其中一处、不要合并\n"
-                + "2) 每条 focus_item 含字段：keyword（对应的关注要点原文，从上方列表逐字复制）、"
-                + "field_label（该处的简短人类可读标题，如「甲方地址」「乙方地址」，用于区分同一要点的多个实例）、"
-                + "extracted_value（文档原文片段）、location（页码/段落定位）、confidence（0~1置信度）\n"
-                + "3) extracted_value 必须是文档原文片段，禁止用省略号(...)缩写、禁止改写\n"
-                + "4) 若文档中确实找不到某要点对应内容，该要点输出一条，extracted_value 置空字符串\"\"（供前端标记缺漏），不要凭空编造\n"
-                + "5) keyword 只允许从上方关注要点列表中选取，禁止自创\n"
-                + "6) focus_items 用于辅助人工定位关键内容，不计入审核评分";
-        } else {
-            focusInstruction = "\n\n【关注列表】focus_items 输出空数组[]即可，无需提取。";
+        if (focusPoints.isEmpty()) {
+            return "\n\n【关注列表】focus_items 输出空数组[]即可，无需提取。";
         }
 
-        String basePrompt = template.getSystemPrompt()
-            .replace("{rules}", rulesText)
-            .replace("{knowledge_context}", knowledgeContext)
-            .replace("{output_format}", outputFormat)
-            .replace("{field_whitelist}", fieldWhitelist)
-            .replace("{rule_count}", ruleCount);
-        // 兼容：如果模板里还残留 {focus_categories} 旧占位符则清空（关注已迁出到独立关注表，不再用分类）
-        if (basePrompt.contains("{focus_categories}")) {
-            basePrompt = basePrompt.replace("{focus_categories}", "（无）");
+        StringBuilder pointSb = new StringBuilder();
+        for (int i = 0; i < focusPoints.size(); i++) {
+            pointSb.append("  ").append(i + 1).append(". 关注要点：\"").append(focusPoints.get(i)).append("\"\n");
         }
-        // 兜底：模板未引用 {output_format} 占位符（system/user 提示词都没写）时，schema 不会被注入，
-        // AI 会自由发挥返回与解析器期望(items)不符的结构（如 audit_result）→ 异常清单静默为空、零报错难排查。
-        // 此处把 output_format 自动追加到主体末尾，并 warn 提示模板配置缺陷，建议补全模板。
-        String userTpl = template.getUserPrompt() != null ? template.getUserPrompt() : "";
-        boolean outputFormatReferenced = template.getSystemPrompt().contains("{output_format}")
-            || userTpl.contains("{output_format}");
-        if (!outputFormatReferenced && !outputFormat.isBlank()) {
-            basePrompt = basePrompt + "\n\n请严格按以下JSON格式返回：\n" + outputFormat;
-            log.warn("[ReviewAgent] 模板(id={}, type={}) 未引用 output_format 占位符，已自动追加输出格式 schema 兜底，建议补全模板配置",
-                template.getId(), template.getType());
+        return "\n\n【关注列表 focus_items·严格约束】除 items 外，还需输出 focus_items 数组。\n"
+            + "需要逐一定位的关注要点如下：\n" + pointSb
+            + "严格规则：\n"
+            + "1) 针对上述每个关注要点，在文档中找出【所有】与该要点相关的原文片段——"
+            + "若同一要点在文中对应多处不同内容（例如「地址」可能有甲方地址、乙方地址、见证方地址），"
+            + "则每一处各输出一条 focus_item（keyword 相同、extracted_value 不同），不要只取其中一处、不要合并\n"
+            + "2) 每条 focus_item 含字段：keyword（对应的关注要点原文，从上方列表逐字复制）、"
+            + "field_label（该处的简短人类可读标题，如「甲方地址」「乙方地址」，用于区分同一要点的多个实例）、"
+            + "extracted_value（文档原文片段）、location（页码/段落定位）、confidence（0~1置信度）\n"
+            + "3) extracted_value 必须是文档原文片段，禁止用省略号(...)缩写、禁止改写\n"
+            + "4) 若文档中确实找不到某要点对应内容，该要点输出一条，extracted_value 置空字符串\"\"（供前端标记缺漏），不要凭空编造\n"
+            + "5) keyword 只允许从上方关注要点列表中选取，禁止自创\n"
+            + "6) focus_items 用于辅助人工定位关键内容，不计入审核评分";
+    }
+
+    private boolean isContentAuditRedactEnabled() {
+        try {
+            String value = configService.getConfigValue(CONFIG_CONTENT_AUDIT_REDACT_ENABLED);
+            if (value == null || value.isBlank()) {
+                return true;
+            }
+            String normalized = value.trim().toLowerCase();
+            return !("false".equals(normalized) || "0".equals(normalized)
+                || "n".equals(normalized) || "no".equals(normalized) || "off".equals(normalized));
+        } catch (Exception e) {
+            log.warn("[ReviewAgent] 读取系统参数 {} 失败，默认启用内容审核定位脱敏: {}",
+                CONFIG_CONTENT_AUDIT_REDACT_ENABLED, e.getMessage());
+            return true;
         }
-        return basePrompt + focusInstruction;
+    }
+
+    private boolean shouldIncludeFocusItemsInPrompt(ReviewTask task) {
+        if (task != null && (isCompareTask(task) || isRedactTask(task))) {
+            return true;
+        }
+        return isContentAuditRedactEnabled();
     }
 
     /**
      * 组装 user prompt：填充表单数据。抽取为 public 供 Graph 节点复用。
      */
     public String buildUserPrompt(ReviewPromptTemplate template, ReviewTask task) {
+        boolean contentAuditRedactEnabled = shouldIncludeFocusItemsInPrompt(task);
+        String outputFormat = template.getOutputFormat() != null ? template.getOutputFormat() : "";
+        if (!contentAuditRedactEnabled) {
+            outputFormat = stripFocusItemsSchema(outputFormat);
+        }
+        String userPrompt = template.getUserPrompt() != null ? template.getUserPrompt() : "";
+        if (!contentAuditRedactEnabled) {
+            userPrompt = stripLegacyFocusPrompt(userPrompt);
+        }
+        return userPrompt
+            .replace("{form_data}", task.getFormSnapshot() != null ? task.getFormSnapshot() : "{}")
+            .replace("{output_format}", outputFormat);
+    }
+
+    private String buildRedactSystemPrompt(ReviewPromptTemplate template, List<String> focusPoints) {
+        StringBuilder pointSb = new StringBuilder();
+        for (int i = 0; i < focusPoints.size(); i++) {
+            pointSb.append("  ").append(i + 1).append(". \"").append(focusPoints.get(i)).append("\"\n");
+        }
+        String outputFormat = template.getOutputFormat() != null ? template.getOutputFormat() : "";
+        return template.getSystemPrompt()
+            .replace("{focus_points}", pointSb.toString())
+            .replace("{output_format}", outputFormat);
+    }
+
+    private String buildRedactUserPrompt(ReviewPromptTemplate template, ReviewTask task) {
         String outputFormat = template.getOutputFormat() != null ? template.getOutputFormat() : "";
         return template.getUserPrompt()
-            .replace("{form_data}", task.getFormSnapshot() != null ? task.getFormSnapshot() : "{}")
+            .replace("{focus_data}", task.getFormSnapshot() != null ? task.getFormSnapshot() : "{}")
             .replace("{output_format}", outputFormat);
     }
 
@@ -802,6 +894,47 @@ public class ReviewAgent {
         return template;
     }
 
+    private void executeRedact(ReviewTask task, long startTime) {
+        Long taskId = task.getId();
+        log.info("[ReviewAgent] 开始文件脱敏关注点定位: id={}, name={}", taskId, task.getTaskName());
+
+        try {
+            task.setStatus("reviewing");
+            taskMapper.updateById(task);
+
+            List<ReviewTaskFile> files = taskFileMapper.selectList(
+                Wrappers.<ReviewTaskFile>lambdaQuery().eq(ReviewTaskFile::getTaskId, taskId)
+            );
+            if (files.isEmpty()) {
+                throw new RuntimeException("请先上传待脱敏文件");
+            }
+
+            List<String> focusPoints = loadRedactFocusPoints(task.getFormSnapshot());
+            if (focusPoints.isEmpty()) {
+                throw new RuntimeException("请选择至少一个关注点");
+            }
+
+            ReviewPromptTemplate template = loadPromptTemplate(TASK_TYPE_FILE_REDACT);
+            AiModelConfigDto modelConfig = resolveModelConfig(template);
+            String systemPrompt = buildRedactSystemPrompt(template, focusPoints);
+            String userPrompt = buildRedactUserPrompt(template, task);
+            String aiResponse = callAi(files, systemPrompt, userPrompt, template, modelConfig);
+            JSONObject result = parseAiResponse(aiResponse);
+
+            long duration = System.currentTimeMillis() - startTime;
+            String modelUsed = determineModel(files, template, modelConfig);
+            updateRedactTaskStatus(task, result, duration, modelUsed, aiResponse, focusPoints);
+
+            log.info("[ReviewAgent] 文件脱敏关注点定位完成: taskId={}, focusCount={}, 耗时={}ms",
+                taskId, focusPoints.size(), duration);
+        } catch (Exception e) {
+            log.error("[ReviewAgent] 文件脱敏关注点定位失败: taskId={}", taskId, e);
+            task.setStatus("failed");
+            task.setAiSummary("文件脱敏定位异常: " + e.getMessage());
+            taskMapper.updateById(task);
+        }
+    }
+
     public ReviewPromptTemplate loadPromptTemplate(String taskType, List<Long> standardIds) {
         ReviewPromptTemplate standardTemplate = loadPromptTemplateFromStandards(taskType, standardIds);
         if (standardTemplate != null) {
@@ -1177,10 +1310,13 @@ public class ReviewAgent {
         task.setResultMarkdown(result.getString("detail_markdown"));
         task.setTotalRules(allRules.size());
 
-        // 关注列表：AI 输出的 focus_items（各分类文本片段，非问题项）存储到 task
-        JSONArray focusItems = result.getJSONArray("focus_items");
-        if (focusItems != null && !focusItems.isEmpty()) {
-            task.setFocusData(focusItems.toJSONString());
+        boolean contentAuditRedactEnabled = isContentAuditRedactEnabled();
+        // 系统参数关闭时，内容审核不落定位/脱敏辅助数据；文件脱敏走独立任务类型，不受此处影响。
+        if (contentAuditRedactEnabled) {
+            JSONArray focusItems = result.getJSONArray("focus_items");
+            if (focusItems != null && !focusItems.isEmpty()) {
+                task.setFocusData(focusItems.toJSONString());
+            }
         }
 
         JSONArray items = result.getJSONArray("items");
@@ -1210,6 +1346,11 @@ public class ReviewAgent {
         task.setMisjudgedCount(0);
         task.setScore(calculateWeightedScore(allRules, items));
         taskMapper.updateById(task);
+        if (!contentAuditRedactEnabled) {
+            taskMapper.update(null, Wrappers.<ReviewTask>lambdaUpdate()
+                .eq(ReviewTask::getId, task.getId())
+                .set(ReviewTask::getFocusData, null));
+        }
 
         List<ReviewTaskStandard> taskStandards = taskStandardMapper.selectList(
             Wrappers.<ReviewTaskStandard>lambdaQuery().eq(ReviewTaskStandard::getTaskId, task.getId())
@@ -1225,7 +1366,7 @@ public class ReviewAgent {
 
     private void updateCompareTaskStatus(ReviewTask task, JSONObject result, long duration, String modelUsed, String aiResponse) {
         task.setStatus("completed");
-        task.setPassStatus("pending");
+        task.setPassStatus(null);
         task.setAiModel(modelUsed);
         task.setReviewDuration(duration);
         task.setAiSummary(result.getString("summary"));
@@ -1247,6 +1388,46 @@ public class ReviewAgent {
         incrementStandardUseCount(task.getId());
     }
 
+    private void updateRedactTaskStatus(ReviewTask task, JSONObject result, long duration, String modelUsed,
+                                        String aiResponse, List<String> focusPoints) {
+        JSONArray focusItems = result.getJSONArray("focus_items");
+        String focusData = focusItems == null
+            ? buildMissingFocusItems(focusPoints).toJSONString()
+            : focusItems.toJSONString();
+
+        taskMapper.update(null, Wrappers.<ReviewTask>lambdaUpdate()
+            .eq(ReviewTask::getId, task.getId())
+            .set(ReviewTask::getStatus, "completed")
+            .set(ReviewTask::getPassStatus, null)
+            .set(ReviewTask::getAiModel, modelUsed)
+            .set(ReviewTask::getReviewDuration, duration)
+            .set(ReviewTask::getAiSummary, result.getString("summary"))
+            .set(ReviewTask::getResultJson, aiResponse)
+            .set(ReviewTask::getResultMarkdown, null)
+            .set(ReviewTask::getFocusData, focusData)
+            .set(ReviewTask::getTotalRules, 0)
+            .set(ReviewTask::getPassCount, 0)
+            .set(ReviewTask::getErrorCount, 0)
+            .set(ReviewTask::getWarningCount, 0)
+            .set(ReviewTask::getInfoCount, 0)
+            .set(ReviewTask::getMisjudgedCount, 0)
+            .set(ReviewTask::getScore, null));
+    }
+
+    private JSONArray buildMissingFocusItems(List<String> focusPoints) {
+        JSONArray arr = new JSONArray();
+        for (String point : focusPoints) {
+            JSONObject o = new JSONObject();
+            o.put("keyword", point);
+            o.put("field_label", point);
+            o.put("extracted_value", "");
+            o.put("location", "");
+            o.put("confidence", 0);
+            arr.add(o);
+        }
+        return arr;
+    }
+
     private void incrementStandardUseCount(Long taskId) {
         List<ReviewTaskStandard> taskStandards = taskStandardMapper.selectList(
             Wrappers.<ReviewTaskStandard>lambdaQuery().eq(ReviewTaskStandard::getTaskId, taskId)
@@ -1263,6 +1444,43 @@ public class ReviewAgent {
     private boolean isCompareTask(ReviewTask task) {
         return task != null && task.getTaskType() != null
             && task.getTaskType().toUpperCase().contains("COMPARE");
+    }
+
+    private boolean isRedactTask(ReviewTask task) {
+        return task != null && TASK_TYPE_FILE_REDACT.equalsIgnoreCase(task.getTaskType());
+    }
+
+    private List<String> loadRedactFocusPoints(String formSnapshot) {
+        if (formSnapshot == null || formSnapshot.isBlank()) {
+            return List.of();
+        }
+        try {
+            JSONObject payload = JSON.parseObject(formSnapshot);
+            JSONArray arr = payload.getJSONArray("focusPoints");
+            if (arr == null) {
+                arr = payload.getJSONArray("focus_points");
+            }
+            if (arr == null || arr.isEmpty()) {
+                return List.of();
+            }
+            java.util.LinkedHashSet<String> seen = new java.util.LinkedHashSet<>();
+            for (int i = 0; i < arr.size(); i++) {
+                Object raw = arr.get(i);
+                String keyword;
+                if (raw instanceof JSONObject obj) {
+                    keyword = obj.getString("keyword");
+                } else {
+                    keyword = String.valueOf(raw);
+                }
+                if (keyword != null && !keyword.isBlank()) {
+                    seen.add(keyword.trim());
+                }
+            }
+            return new ArrayList<>(seen);
+        } catch (Exception e) {
+            log.warn("[ReviewAgent] 解析文件脱敏关注点失败: {}", e.getMessage());
+            return List.of();
+        }
     }
 
     // ==================== 加权评分 ====================
