@@ -29,6 +29,9 @@ public class ReviewToolResultVo implements Serializable {
     /** 审核任务ID（同 id 的 Long 形态） */
     private Long reviewTaskId;
 
+    /** 来源类型：AI_TOOL 为审核系统内置工具，其他值多为外部平台任务 */
+    private String sourceType;
+
     /** 审核类型 COMPARE 双文档对比 / AUDIT 单文档内容审查（前端据此决定打开哪个查看器） */
     private String reviewtype;
 

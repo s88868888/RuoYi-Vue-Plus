@@ -65,6 +65,8 @@ import java.util.stream.Collectors;
 @RequiredArgsConstructor
 public class ReviewAgent {
 
+    private static final String SOURCE_TYPE_AI_TOOL = "AI_TOOL";
+    private static final String TASK_TYPE_CONTENT_AUDIT = "CONTENT_AUDIT";
     private static final String TASK_TYPE_FILE_REDACT = "FILE_REDACT";
     private static final String CONFIG_CONTENT_AUDIT_REDACT_ENABLED = "review.contentAudit.redact.enabled";
 
@@ -408,7 +410,10 @@ public class ReviewAgent {
         if (task != null && (isCompareTask(task) || isRedactTask(task))) {
             return true;
         }
-        return isContentAuditRedactEnabled();
+        if (isInternalContentAuditTask(task)) {
+            return isContentAuditRedactEnabled();
+        }
+        return true;
     }
 
     /**
@@ -1310,8 +1315,8 @@ public class ReviewAgent {
         task.setResultMarkdown(result.getString("detail_markdown"));
         task.setTotalRules(allRules.size());
 
-        boolean contentAuditRedactEnabled = isContentAuditRedactEnabled();
-        // 系统参数关闭时，内容审核不落定位/脱敏辅助数据；文件脱敏走独立任务类型，不受此处影响。
+        boolean contentAuditRedactEnabled = shouldIncludeFocusItemsInPrompt(task);
+        // 系统参数关闭时，仅 AI 审核系统内置内容审核不落定位/脱敏辅助数据；外部平台与文件脱敏不受影响。
         if (contentAuditRedactEnabled) {
             JSONArray focusItems = result.getJSONArray("focus_items");
             if (focusItems != null && !focusItems.isEmpty()) {
@@ -1448,6 +1453,12 @@ public class ReviewAgent {
 
     private boolean isRedactTask(ReviewTask task) {
         return task != null && TASK_TYPE_FILE_REDACT.equalsIgnoreCase(task.getTaskType());
+    }
+
+    private boolean isInternalContentAuditTask(ReviewTask task) {
+        return task != null
+            && TASK_TYPE_CONTENT_AUDIT.equalsIgnoreCase(task.getTaskType())
+            && SOURCE_TYPE_AI_TOOL.equalsIgnoreCase(task.getSourceType());
     }
 
     private List<String> loadRedactFocusPoints(String formSnapshot) {

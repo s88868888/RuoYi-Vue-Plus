@@ -56,6 +56,8 @@ import java.util.stream.Collectors;
 @RequiredArgsConstructor
 public class ReviewToolServiceImpl implements IReviewToolService {
 
+    private static final String SOURCE_TYPE_AI_TOOL = "AI_TOOL";
+    private static final String TASK_TYPE_CONTENT_AUDIT = "CONTENT_AUDIT";
     private static final String TASK_TYPE_FILE_REDACT = "FILE_REDACT";
     private static final String CONFIG_CONTENT_AUDIT_REDACT_ENABLED = "review.contentAudit.redact.enabled";
 
@@ -80,6 +82,7 @@ public class ReviewToolServiceImpl implements IReviewToolService {
         ReviewToolResultVo vo = new ReviewToolResultVo();
         vo.setId(String.valueOf(task.getId()));
         vo.setReviewTaskId(task.getId());
+        vo.setSourceType(task.getSourceType());
         vo.setStatus(normalizeStatus(task.getStatus()));
         vo.setPassStatus(task.getPassStatus());
         vo.setScore(task.getScore());
@@ -103,7 +106,7 @@ public class ReviewToolServiceImpl implements IReviewToolService {
         // 仅凭关键字判定会落空 → 双文件=对比，单文件=内容审查。
         vo.setReviewtype(toReviewType(task.getTaskType(), files.size()));
         boolean isCompare = "COMPARE".equals(vo.getReviewtype());
-        boolean focusFeatureVisible = isFileRedactTask || isCompare || isContentAuditRedactEnabled();
+        boolean focusFeatureVisible = isFileRedactTask || isCompare || shouldShowFocusFeature(task);
         vo.setRedactData(focusFeatureVisible ? task.getRedactData() : null);
         ReviewTaskFile signFile;
         if (isCompare) {
@@ -537,5 +540,18 @@ public class ReviewToolServiceImpl implements IReviewToolService {
                 CONFIG_CONTENT_AUDIT_REDACT_ENABLED, e.getMessage());
             return true;
         }
+    }
+
+    private boolean shouldShowFocusFeature(ReviewTask task) {
+        if (isInternalContentAuditTask(task)) {
+            return isContentAuditRedactEnabled();
+        }
+        return true;
+    }
+
+    private boolean isInternalContentAuditTask(ReviewTask task) {
+        return task != null
+            && TASK_TYPE_CONTENT_AUDIT.equalsIgnoreCase(task.getTaskType())
+            && SOURCE_TYPE_AI_TOOL.equalsIgnoreCase(task.getSourceType());
     }
 }
