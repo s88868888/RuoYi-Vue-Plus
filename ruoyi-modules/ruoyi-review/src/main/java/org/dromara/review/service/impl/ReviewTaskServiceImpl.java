@@ -48,6 +48,7 @@ import java.util.List;
 import java.util.stream.Collectors;
 import java.util.HashMap;
 import java.util.Map;
+import java.util.Date;
 
 /**
  * 审核任务Service业务层处理
@@ -244,6 +245,10 @@ public class ReviewTaskServiceImpl implements IReviewTaskService {
             existing.setWarningCount(null);
             existing.setInfoCount(null);
             existing.setMisjudgedCount(0);
+            // 复用旧行重审时刷新提交时间，使该任务在列表（按 createTime 倒序）冒泡到顶部，
+            // 否则重审任务一直停留在首次创建时间、被新任务淹没（如城更协议固定 sourceId 反复发起时
+            // 永远复用 5-28 那行，导致"城更执行了但审核系统列表看不到"）。version 仍累加体现累计审核次数。
+            existing.setCreateTime(new Date());
             baseMapper.updateById(existing);
 
             // 重新写关联标准 & 附件
